@@ -60,7 +60,7 @@ services:
         for broker in kafka-a:19092 kafka-b:19092; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$$broker" \
             --create --if-not-exists --topic events --partitions 2 --replication-factor 1 \
-            --config retention.ms=-1 --config retention.bytes=-1
+            --config retention.ms=-1 --config retention.bytes=-1 --config cleanup.policy=delete
         done
 
 volumes:
