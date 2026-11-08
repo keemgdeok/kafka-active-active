@@ -61,6 +61,13 @@ final class CompletionLedger implements AutoCloseable {
         } catch (IllegalStateException failure) {
             if (!(rootCause(failure) instanceof TopicExistsException)) { throw failure; }
         }
+        // A controller's CreateTopics ACK can precede broker metadata visibility. The native
+        // consumer waits for this topic's metadata within the configured operation timeout.
+        // Later snapshots must still fail on disappearance; this wait is initialization only.
+        var visible = reader.partitionsFor(settings.completionTopic(), settings.operationTimeout());
+        if (visible == null || visible.size() != 2) {
+            throw new IllegalStateException("completion topic did not become visible with two partitions");
+        }
         snapshot();
     }
 
