@@ -56,6 +56,10 @@ tasks.withType<JavaCompile>().configureEach {
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     maxParallelForks = 1
+    // Pin Testcontainers' support images as well as the Kafka/Toxiproxy workload images.
+    // These are the manifests for the framework defaults: Ryuk 0.14.0 and Alpine 3.17.
+    environment("TESTCONTAINERS_RYUK_CONTAINER_IMAGE", "testcontainers/ryuk@sha256:7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0")
+    environment("TESTCONTAINERS_TINYIMAGE_CONTAINER_IMAGE", "alpine@sha256:8fc3dacfb6d69da8d44e42390de777e48577085db99aa4e4af35f483eb08b989")
     testLogging {
         events("passed", "skipped", "failed")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
