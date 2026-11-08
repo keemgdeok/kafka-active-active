@@ -23,6 +23,9 @@ java {
 val integrationTest = sourceSets.create("integrationTest")
 configurations[integrationTest.implementationConfigurationName].extendsFrom(configurations.testImplementation.get())
 configurations[integrationTest.runtimeOnlyConfigurationName].extendsFrom(configurations.testRuntimeOnly.get())
+val faultTest = sourceSets.create("faultTest")
+configurations[faultTest.implementationConfigurationName].extendsFrom(configurations[integrationTest.implementationConfigurationName])
+configurations[faultTest.runtimeOnlyConfigurationName].extendsFrom(configurations[integrationTest.runtimeOnlyConfigurationName])
 
 dependencies {
     api("org.apache.kafka:kafka-clients:4.3.2")
@@ -36,6 +39,8 @@ dependencies {
     add(integrationTest.implementationConfigurationName, platform("org.testcontainers:testcontainers-bom:2.0.5"))
     add(integrationTest.implementationConfigurationName, "org.testcontainers:testcontainers-kafka")
     add(integrationTest.implementationConfigurationName, "org.testcontainers:testcontainers-junit-jupiter")
+    add(faultTest.implementationConfigurationName, integrationTest.output)
+    add(faultTest.implementationConfigurationName, "org.testcontainers:testcontainers-toxiproxy:2.0.5")
 }
 
 tasks.withType<JavaCompile>().configureEach {
@@ -60,6 +65,18 @@ tasks.register<Test>("integrationTest") {
     classpath = integrationTest.runtimeClasspath
     shouldRunAfter(tasks.test)
     timeout.set(Duration.ofMinutes(15))
+}
+
+tasks.register<Test>("faultTest") {
+    description = "Runs seeded network and abrupt-process fault contracts. Requires Docker."
+    group = "verification"
+    testClassesDirs = faultTest.output.classesDirs
+    classpath = faultTest.runtimeClasspath
+    systemProperty("kaa.fault.seeds", providers.gradleProperty("faultSeeds").getOrElse("0"))
+    systemProperty("kaa.fault.classpath", faultTest.runtimeClasspath.asPath)
+    shouldRunAfter(tasks.named("integrationTest"))
+    timeout.set(Duration.ofMinutes(50))
+    outputs.upToDateWhen { false }
 }
 
 dependencyLocking {
