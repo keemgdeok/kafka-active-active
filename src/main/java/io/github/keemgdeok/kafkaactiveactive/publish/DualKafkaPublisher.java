@@ -7,7 +7,6 @@ import static io.github.keemgdeok.kafkaactiveactive.publish.PublishResult.Status
 import static io.github.keemgdeok.kafkaactiveactive.publish.PublishResult.Status.REJECTED;
 import static io.github.keemgdeok.kafkaactiveactive.publish.PublishResult.Status.UNKNOWN;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
@@ -24,12 +23,13 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
+
+import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
+
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
-import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 
 /**
@@ -41,8 +41,8 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
  * continuations may run on an SDK or Kafka callback thread.
  */
 public final class DualKafkaPublisher implements AutoCloseable {
-    public static final String EVENT_ID_HEADER = "kaa.event.id";
-    public static final String FORMAT_HEADER = "kaa.format";
+    public static final String EVENT_ID_HEADER = EventCodec.EVENT_ID_HEADER;
+    public static final String FORMAT_HEADER = EventCodec.FORMAT_HEADER;
     private final PublishConfig config;
     private final List<Producer<byte[], byte[]>> producers;
     private final List<ThreadPoolExecutor> dispatchers;
@@ -161,10 +161,7 @@ public final class DualKafkaPublisher implements AutoCloseable {
                 return;
             }
             Event event = request.event;
-            var record = new ProducerRecord<>(config.topic(), event.partition(), null,
-                    event.key().getBytes(StandardCharsets.UTF_8), event.payload(), List.of(
-                    new RecordHeader(EVENT_ID_HEADER, event.eventId().getBytes(StandardCharsets.UTF_8)),
-                    new RecordHeader(FORMAT_HEADER, new byte[] {1})));
+            var record = EventCodec.encode(config.topic(), event);
             producers.get(side).send(record, (metadata, error) -> request.finished(side, metadata, error));
         } catch (RuntimeException failure) {
             request.finished(side, null, failure);
