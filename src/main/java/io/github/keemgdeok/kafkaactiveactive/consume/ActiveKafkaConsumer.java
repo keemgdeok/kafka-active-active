@@ -70,7 +70,7 @@ public final class ActiveKafkaConsumer implements AutoCloseable {
             config.put("partition.assignment.strategy", RangeAssignor.class.getName());
             config.put("session.timeout.ms", 6_000);
             config.put("heartbeat.interval.ms", 500);
-            config.put("max.poll.interval.ms", 120_000);
+            config.putIfAbsent("max.poll.interval.ms", 120_000);
             reader = new KafkaConsumer<>(config);
             input = reader;
             completed = new CompletedIndex(settings);
@@ -136,12 +136,16 @@ public final class ActiveKafkaConsumer implements AutoCloseable {
                 if (producer == null || !input.assignment().contains(topicPartition)) {
                     throw new IllegalStateException("input partition no longer assigned");
                 }
+                var groupMetadata = input.groupMetadata();
+                if (groupMetadata.generationId() < 0 || groupMetadata.memberId().isBlank()) {
+                    throw new IllegalStateException("consumer no longer has valid group membership");
+                }
                 var markers = plan.markers().getOrDefault(partition, List.of());
                 producer.beginTransaction();
                 for (var marker : markers) { producer.send(marker.record(settings.completionTopic())); }
                 commitHook.accept(partition, CommitPoint.MARKERS_SENT);
                 producer.sendOffsetsToTransaction(Map.of(topicPartition,
-                        new OffsetAndMetadata(entry.getValue(), offsetMetadata())), input.groupMetadata());
+                        new OffsetAndMetadata(entry.getValue(), offsetMetadata())), groupMetadata);
                 commitHook.accept(partition, CommitPoint.OFFSETS_STAGED);
                 producer.commitTransaction();
                 commitHook.accept(partition, CommitPoint.LOCAL_COMMITTED);

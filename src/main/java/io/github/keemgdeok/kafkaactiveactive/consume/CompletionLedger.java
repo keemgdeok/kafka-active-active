@@ -9,11 +9,17 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import io.github.keemgdeok.kafkaactiveactive.repair.RepairReport;
+
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.ListOffsetsOptions;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.consumer.CloseOptions;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.TopicExistsException;
@@ -144,12 +150,51 @@ final class CompletionLedger implements AutoCloseable {
         }
     }
 
+    void fenceStoppedGroup() {
+        requireGroupStopped();
+        for (int partition = 0; partition < 2; partition++) {
+            var producer = transactionProducer(partition);
+            producer.close(Duration.ZERO);
+        }
+    }
+
     String businessTopicId() {
         var topic = await(admin.describeTopics(List.of(settings.topic())).allTopicNames()).get(settings.topic());
         if (topic.partitions().size() != 2 || topic.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
             throw new IllegalStateException("business topic must have two RF=1 partitions");
         }
         return topic.topicId().toString();
+    }
+
+    void resetInputOffsets(Snapshot boundary) {
+        requireGroupStopped();
+        verify(boundary);
+        String metadata = "kaa-ledger=" + boundary.topicId() + ";input=" + businessTopicId();
+        await(admin.alterConsumerGroupOffsets(settings.groupId(), Map.of(
+                new TopicPartition(settings.topic(), 0), new OffsetAndMetadata(0, metadata),
+                new TopicPartition(settings.topic(), 1), new OffsetAndMetadata(0, metadata))).all());
+    }
+
+    void verifyBusinessBoundary(RepairReport.LogBoundary expected) {
+        if (!expected.topicId().equals(businessTopicId())
+                || !expected.clusterId().equals(await(admin.describeCluster().clusterId()))) {
+            throw new IllegalStateException("business log identity changed after preparation");
+        }
+        var p0 = new TopicPartition(settings.topic(), 0);
+        var p1 = new TopicPartition(settings.topic(), 1);
+        var options = new ListOffsetsOptions(IsolationLevel.READ_COMMITTED);
+        var beginnings = await(admin.listOffsets(Map.of(p0, OffsetSpec.earliest(),
+                p1, OffsetSpec.earliest()), options).all());
+        var ends = await(admin.listOffsets(Map.of(p0, OffsetSpec.latest(),
+                p1, OffsetSpec.latest()), options).all());
+        for (var partition : List.of(p0, p1)) {
+            var before = expected.partitions().get(partition.partition());
+            var after = ends.get(partition);
+            if (beginnings.get(partition).offset() != before.beginning() || after.offset() < before.end()
+                    || after.leaderEpoch().isEmpty() || after.leaderEpoch().orElseThrow() != before.leaderEpoch()) {
+                throw new IllegalStateException("business log boundary or epoch changed after preparation");
+            }
+        }
     }
 
     static Map<String, Object> readerProperties(ConsumerSettings settings, Map<String, Object> nativeConfig) {
