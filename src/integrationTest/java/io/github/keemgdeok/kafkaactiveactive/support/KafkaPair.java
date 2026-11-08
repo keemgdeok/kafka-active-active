@@ -18,7 +18,7 @@ public final class KafkaPair implements AutoCloseable {
     public final KafkaContainer b = broker("PbK8mGojT1n2M9p8Zq4Xch");
     private final String diagnostics;
     public KafkaPair(String diagnostics) { this.diagnostics = diagnostics; }
-    private static KafkaContainer broker(String id) {
+    public static KafkaContainer broker(String id) {
         return new KafkaContainer(IMAGE).withEnv("CLUSTER_ID", id)
                 .withEnv("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false")
                 .withEnv("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
