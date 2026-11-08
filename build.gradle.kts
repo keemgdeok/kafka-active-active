@@ -2,6 +2,11 @@ import java.time.Duration
 
 plugins {
     `java-library`
+    application
+}
+
+application {
+    mainClass.set("io.github.keemgdeok.kafkaactiveactive.demo.DemoMain")
 }
 
 group = "io.github.keemgdeok"

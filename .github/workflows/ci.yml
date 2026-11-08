@@ -60,5 +60,6 @@ jobs:
             build/test-results/integrationTest/
             build/reports/tests/integrationTest/
             build/reports/integrationTest/
+            build/reports/demo/
           if-no-files-found: ignore
           retention-days: 7
