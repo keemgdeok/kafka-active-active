@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.util.Map;
 
 import io.github.keemgdeok.kafkaactiveactive.support.CrashProcess;
+import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventDataset;
 
 /** Test-only entry point; never part of the published SDK artifact. */
@@ -12,7 +13,7 @@ public final class ConsumerCrashChild {
     public static void main(String[] args) {
         var settings = new ConsumerSettings(args[0], args[1], Duration.ofSeconds(5), 100, 1_000, 1_000_000, 1_024);
         String point = args[4];
-        var expected = EventDataset.generate(1, Integer.parseInt(args[5]), false).getFirst();
+        var expected = input(Integer.parseInt(args[5]));
         try (var consumer = new ActiveKafkaConsumer(settings, Map.of("bootstrap.servers", args[2]),
                 Map.of("bootstrap.servers", args[3]), (partition, reached) -> {
                     if (reached.name().equals(point)) { CrashProcess.halt(point); }
@@ -31,5 +32,11 @@ public final class ConsumerCrashChild {
             }
             throw new AssertionError("child did not receive seeded event");
         }
+    }
+    static Event input(int seed) {
+        // Small consecutive Random seeds can share their first key. Explicitly alternate the
+        // partition so the repeated crash windows exercise both stable transactional identities.
+        return EventDataset.generate(32, seed, false).stream().filter(event -> event.partition() == seed % 2)
+                .findFirst().orElseThrow();
     }
 }

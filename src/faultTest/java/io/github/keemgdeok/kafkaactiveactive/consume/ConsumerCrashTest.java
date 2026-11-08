@@ -18,7 +18,6 @@ import io.github.keemgdeok.kafkaactiveactive.support.CrashProcess;
 import io.github.keemgdeok.kafkaactiveactive.support.FaultSeeds;
 import io.github.keemgdeok.kafkaactiveactive.support.KafkaPair;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventAudit;
-import io.github.keemgdeok.kafkaactiveactive.verification.EventDataset;
 import io.github.keemgdeok.kafkaactiveactive.verification.JsonlEvidence;
 
 import org.apache.kafka.clients.admin.Admin;
@@ -42,7 +41,7 @@ class ConsumerCrashTest {
         String topic = "crash-" + UUID.randomUUID();
         KAFKA.createTopic(topic);
         var settings = new ConsumerSettings(topic, "group-" + UUID.randomUUID(), Duration.ofSeconds(5), 100, 1_000, 1_000_000, 1_024);
-        var events = EventDataset.generate(1, seed, false);
+        var events = List.of(ConsumerCrashChild.input(seed));
         try (var evidence = new JsonlEvidence(Path.of("build/reports/faultTest", "consumer-" + seed + "-" + point + ".jsonl"))) {
             evidence.record("scenario", Map.of("seed", seed, "topic", topic, "group", settings.groupId(), "fault_point", point,
                     "partition", events.getFirst().partition(), "operation_timeout_ms", settings.operationTimeout().toMillis()));
