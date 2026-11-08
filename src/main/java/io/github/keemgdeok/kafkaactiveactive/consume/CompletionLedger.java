@@ -55,20 +55,49 @@ final class CompletionLedger implements AutoCloseable {
     }
 
     private void ensureTopic() {
+        String createdId = null;
         try {
-            await(admin.createTopics(List.of(new NewTopic(settings.completionTopic(), 2, (short) 1).configs(Map.of(
-                    "cleanup.policy", "compact", "retention.ms", "-1", "retention.bytes", "-1")))).all());
+            var creation = admin.createTopics(List.of(new NewTopic(settings.completionTopic(), 2, (short) 1).configs(Map.of(
+                    "cleanup.policy", "compact", "retention.ms", "-1", "retention.bytes", "-1"))));
+            await(creation.all());
+            createdId = await(creation.topicId(settings.completionTopic())).toString();
         } catch (IllegalStateException failure) {
             if (!(rootCause(failure) instanceof TopicExistsException)) { throw failure; }
         }
-        // A controller's CreateTopics ACK can precede broker metadata visibility. The native
-        // consumer waits for this topic's metadata within the configured operation timeout.
-        // Later snapshots must still fail on disappearance; this wait is initialization only.
-        var visible = reader.partitionsFor(settings.completionTopic(), settings.operationTimeout());
-        if (visible == null || visible.size() != 2) {
-            throw new IllegalStateException("completion topic did not become visible with two partitions");
-        }
+        awaitInitialMetadata(createdId);
         snapshot();
+    }
+
+    private void awaitInitialMetadata(String createdId) {
+        // CreateTopics ACK can precede broker visibility, especially after deletion/recreation.
+        // Poll fresh Admin metadata, not consumer metadata which may cache an empty result.
+        // Only initialization tolerates this transient state; subsequent snapshots fail closed.
+        long deadline = System.nanoTime() + settings.operationTimeout().toNanos();
+        while (true) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) { throw new IllegalStateException("completion topic metadata readiness deadline elapsed"); }
+            try {
+                var topic = admin.describeTopics(List.of(settings.completionTopic())).allTopicNames()
+                        .get(remaining, TimeUnit.NANOSECONDS).get(settings.completionTopic());
+                if (topic.partitions().size() != 2 || topic.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
+                    throw new IllegalStateException("completion topic must have two RF=1 partitions");
+                }
+                if ((createdId == null || createdId.equals(topic.topicId().toString()))
+                        && topic.partitions().stream().allMatch(p -> p.leader() != null && p.leader().id() >= 0)) { return; }
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("completion metadata readiness interrupted", failure);
+            } catch (ExecutionException failure) {
+                Throwable cause = rootCause(failure);
+                if (!(cause instanceof org.apache.kafka.common.errors.UnknownTopicOrPartitionException)
+                        && !(cause instanceof org.apache.kafka.common.errors.LeaderNotAvailableException)) {
+                    throw new IllegalStateException("completion metadata readiness failed", failure);
+                }
+            } catch (TimeoutException failure) {
+                throw new IllegalStateException("completion metadata readiness deadline elapsed", failure);
+            }
+            java.util.concurrent.locks.LockSupport.parkNanos(Math.min(Duration.ofMillis(20).toNanos(), Math.max(0, deadline - System.nanoTime())));
+        }
     }
 
     Snapshot snapshot() {

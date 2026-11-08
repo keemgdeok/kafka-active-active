@@ -46,6 +46,22 @@ class GroupTransitionIntegrationTest {
     @BeforeAll static void start() { KAFKA.start(); }
     @AfterAll static void stop() throws Exception { KAFKA.close(); }
 
+    @Test void differentLogicalGroupsConsumeBothKafkasConcurrentlyWithoutSharingCompletionState() throws Exception {
+        var aSettings = scenario();
+        var bSettings = new ConsumerSettings(aSettings.topic(), "other-" + UUID.randomUUID(), aSettings.operationTimeout(),
+                100, 1_000, 1_000_000, 1_024);
+        var aCalls = new ConcurrentHashMap<String, AtomicInteger>();
+        var bCalls = new ConcurrentHashMap<String, AtomicInteger>();
+        try (var a = new ManagedConsumer(aSettings, KAFKA.aProperties(), KAFKA.bProperties(), aCalls, false);
+             var b = new ManagedConsumer(bSettings, KAFKA.bProperties(), KAFKA.aProperties(), bCalls, false)) {
+            publish(aSettings, 4, "both-groups-");
+            await(() -> a.committedIds().size() == 4 && b.committedIds().size() == 4);
+            assertEquals(aCalls.keySet(), bCalls.keySet());
+            assertTrue(aCalls.values().stream().allMatch(count -> count.get() == 1));
+            assertTrue(bCalls.values().stream().allMatch(count -> count.get() == 1));
+        }
+    }
+
     @Test void nativeRebalanceAssignsTwoPartitionsAndParksExcessInstances() throws Exception {
         var settings = scenario();
         var calls = new ConcurrentHashMap<String, AtomicInteger>();

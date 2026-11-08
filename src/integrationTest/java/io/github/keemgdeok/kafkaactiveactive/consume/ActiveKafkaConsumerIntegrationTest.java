@@ -176,6 +176,22 @@ class ActiveKafkaConsumerIntegrationTest {
         }
     }
 
+    @Test void rapidCompletionTopicRecreationWaitsForFreshBrokerMetadata() throws Exception {
+        var settings = scenario();
+        String previous = null;
+        try (Admin admin = Admin.create(KAFKA.aProperties())) {
+            for (int iteration = 0; iteration < 10; iteration++) {
+                try (var ledger = new CompletionLedger(settings, KAFKA.aProperties())) {
+                    var boundary = ledger.snapshot();
+                    org.junit.jupiter.api.Assertions.assertNotEquals(previous, boundary.topicId());
+                    assertEquals(0, ledger.replay(boundary).size());
+                    previous = boundary.topicId();
+                }
+                admin.deleteTopics(List.of(settings.completionTopic())).all().get(10, TimeUnit.SECONDS);
+            }
+        }
+    }
+
     @Test void completedIdWithChangedPayloadFailsBeforeHandlerAndDifferentGroupsRemainIndependent() throws Exception {
         var settings = scenario();
         publish(settings, List.of(event("one", (byte) 1)));
