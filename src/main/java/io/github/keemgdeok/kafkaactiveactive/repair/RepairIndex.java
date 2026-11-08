@@ -1,18 +1,10 @@
 package io.github.keemgdeok.kafkaactiveactive.repair;
 
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+
 import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.common.header.Header;
-import org.apache.kafka.common.utils.Utils;
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
 
 final class RepairIndex {
     private final RepairConfig config;
@@ -77,52 +69,12 @@ final class RepairIndex {
     }
 
     static Value decode(ConsumerRecord<byte[], byte[]> record, int maxBytes) {
-        byte[] id = uniqueHeader(record, DualKafkaPublisher.EVENT_ID_HEADER);
-        byte[] version = uniqueHeader(record, DualKafkaPublisher.FORMAT_HEADER);
-        if (!Arrays.equals(version, new byte[] {1}) || record.key() == null || record.value() == null
-                || (long) id.length + record.key().length + record.value().length > maxBytes) {
-            throw invalid("unsupported format, null record bytes, or oversized event");
-        }
-        String eventId = text(id);
-        if (eventId.isBlank() || text(record.key()).isBlank()
-                || record.partition() != Utils.toPositive(Utils.murmur2(record.key())) % 2) {
-            throw invalid("invalid event ID, key or partition");
-        }
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            digest.update(ByteBuffer.allocate(4).putInt(record.key().length).array());
-            digest.update(record.key());
-            digest.update(record.value());
-            return new Value(eventId, digest.digest());
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new AssertionError(impossible);
+            var identity = io.github.keemgdeok.kafkaactiveactive.internal.EventCodec.identity(record, maxBytes);
+            return new Value(identity.id(), identity.hash());
+        } catch (IllegalArgumentException invalid) {
+            throw new RepairException(RepairException.Reason.INVALID_RECORD, invalid.getMessage(), invalid);
         }
-    }
-
-    private static byte[] uniqueHeader(ConsumerRecord<byte[], byte[]> record, String key) {
-        byte[] value = null;
-        int count = 0;
-        for (Header header : record.headers().headers(key)) {
-            count++;
-            value = header.value();
-        }
-        if (count != 1 || value == null) {
-            throw invalid("missing or repeated SDK header: " + key);
-        }
-        return value;
-    }
-
-    private static String text(byte[] bytes) {
-        try {
-            return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-                    .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
-        } catch (CharacterCodingException failure) {
-            throw invalid("SDK identity and key must be valid UTF-8");
-        }
-    }
-
-    private static RepairException invalid(String message) {
-        return new RepairException(RepairException.Reason.INVALID_RECORD, message);
     }
 
     record Value(String id, byte[] hash) {}
