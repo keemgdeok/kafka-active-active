@@ -150,9 +150,8 @@ final class KafkaRepairLog implements RepairLog {
     @Override
     public void append(ConsumerRecord<byte[], byte[]> record) {
         deadline.remaining();
-        var headers = new org.apache.kafka.common.header.internals.RecordHeaders(record.headers().toArray());
-        var copy = new ProducerRecord<>(config.topic(), record.partition(), record.timestamp() >= 0
-                ? record.timestamp() : null, record.key(), record.value(), headers);
+        var copy = io.github.keemgdeok.kafkaactiveactive.internal.EventCodec.replica(
+                config.topic(), record, config.maxEventBytes());
         var ack = await(producer.send(copy));
         if (!ack.hasOffset()) {
             throw new RepairException(RepairException.Reason.CLIENT_FAILURE, "repair append returned no offset");
