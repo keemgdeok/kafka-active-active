@@ -42,11 +42,13 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.kafka.KafkaContainer;
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 
 @Testcontainers
+@SuppressWarnings("try")
 class RepairIntegrationTest {
     private static final String IMAGE = "apache/kafka@sha256:852a0d49fc4e656b022e7f23785411802c9a088c78a7c5e39f33969de9c227a7";
     @Container
@@ -240,7 +242,8 @@ class RepairIntegrationTest {
         write(A, topic, List.of(event("seed", "kafka")));
         AtomicInteger generated = new AtomicInteger();
         RepairReport report;
-        try (var publisher = DualKafkaPublisher.open(PublishConfig.defaults(topic), properties(A), properties(B))) {
+        try (var replication = ReplicationFixture.start(topic, properties(A), properties(B));
+             var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), properties(A), properties(B)))) {
             var config = RepairConfig.defaults(topic);
             try (var repair = new RepairService(config,
                     deadline -> new AdvancingLog(new KafkaRepairLog(config, properties(A), deadline), publisher, generated),
@@ -300,8 +303,8 @@ class RepairIntegrationTest {
             for (Event event : events) {
                 var record = new ProducerRecord<>(topic, event.partition(), null,
                         event.key().getBytes(StandardCharsets.UTF_8), event.payload(), List.of(
-                        new RecordHeader(DualKafkaPublisher.EVENT_ID_HEADER, event.eventId().getBytes(StandardCharsets.UTF_8)),
-                        new RecordHeader(DualKafkaPublisher.FORMAT_HEADER, new byte[] {1})));
+                        new RecordHeader(RoutedKafkaPublisher.EVENT_ID_HEADER, event.eventId().getBytes(StandardCharsets.UTF_8)),
+                        new RecordHeader(RoutedKafkaPublisher.FORMAT_HEADER, new byte[] {1})));
                 producer.send(record).get(10, TimeUnit.SECONDS);
             }
         }
@@ -367,7 +370,7 @@ class RepairIntegrationTest {
         Files.writeString(directory.resolve(name + ".log"), container.getLogs());
     }
 
-    private record AdvancingLog(RepairLog delegate, DualKafkaPublisher publisher, AtomicInteger generated)
+    private record AdvancingLog(RepairLog delegate, RoutedKafkaPublisher publisher, AtomicInteger generated)
             implements RepairLog {
         @Override
         public RepairReport.LogBoundary capture() {

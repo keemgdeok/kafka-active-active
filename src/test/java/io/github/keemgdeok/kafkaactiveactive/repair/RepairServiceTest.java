@@ -20,7 +20,7 @@ import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.Test;
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 
 class RepairServiceTest {
@@ -192,15 +192,15 @@ class RepairServiceTest {
     @Test
     void malformedHeadersAndUnsupportedVersionFailExplicitly() {
         var record = a.add("id", "kafka", "value");
-        record.headers().add(DualKafkaPublisher.EVENT_ID_HEADER, new byte[] {1});
+        record.headers().add(RoutedKafkaPublisher.EVENT_ID_HEADER, new byte[] {1});
         try (var repair = service(100, 100_000)) {
             assertReason(RepairException.Reason.INVALID_RECORD, repair::runOnce);
             assertTrue(b.records.isEmpty());
         }
-        record.headers().remove(DualKafkaPublisher.EVENT_ID_HEADER)
-                .add(DualKafkaPublisher.EVENT_ID_HEADER, new byte[] {'i', 'd'});
-        record.headers().remove(DualKafkaPublisher.FORMAT_HEADER)
-                .add(DualKafkaPublisher.FORMAT_HEADER, new byte[] {2});
+        record.headers().remove(RoutedKafkaPublisher.EVENT_ID_HEADER)
+                .add(RoutedKafkaPublisher.EVENT_ID_HEADER, new byte[] {'i', 'd'});
+        record.headers().remove(RoutedKafkaPublisher.FORMAT_HEADER)
+                .add(RoutedKafkaPublisher.FORMAT_HEADER, new byte[] {2});
         try (var repair = service(100, 100_000)) {
             assertReason(RepairException.Reason.INVALID_RECORD, repair::runOnce);
         }
@@ -319,8 +319,8 @@ class RepairServiceTest {
             long offset = records.stream().filter(record -> record.partition() == partition).count();
             var record = new ConsumerRecord<>("events", partition, offset,
                     key.getBytes(StandardCharsets.UTF_8), payload.getBytes(StandardCharsets.UTF_8));
-            record.headers().add(DualKafkaPublisher.EVENT_ID_HEADER, id.getBytes(StandardCharsets.UTF_8));
-            record.headers().add(DualKafkaPublisher.FORMAT_HEADER, new byte[] {1});
+            record.headers().add(RoutedKafkaPublisher.EVENT_ID_HEADER, id.getBytes(StandardCharsets.UTF_8));
+            record.headers().add(RoutedKafkaPublisher.FORMAT_HEADER, new byte[] {1});
             records.add(record);
             return record;
         }
@@ -357,7 +357,7 @@ class RepairServiceTest {
             if (++appends == failAppendAt) {
                 throw new IllegalStateException("injected append failure");
             }
-            add(new String(record.headers().lastHeader(DualKafkaPublisher.EVENT_ID_HEADER).value(),
+            add(new String(record.headers().lastHeader(RoutedKafkaPublisher.EVENT_ID_HEADER).value(),
                     StandardCharsets.UTF_8), new String(record.key(), StandardCharsets.UTF_8),
                     new String(record.value(), StandardCharsets.UTF_8));
         }

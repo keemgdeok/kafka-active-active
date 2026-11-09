@@ -13,7 +13,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 import io.github.keemgdeok.kafkaactiveactive.support.KafkaPair;
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+@SuppressWarnings("try")
 class ActiveKafkaConsumerIntegrationTest {
     private static final KafkaPair KAFKA = new KafkaPair("consumer-brokers");
     @BeforeAll static void start() { KAFKA.start(); }
@@ -248,9 +250,11 @@ class ActiveKafkaConsumerIntegrationTest {
     }
     private static Event event(String id, byte value) { return new Event(id, "kafka", new byte[] {0, -1, value}); }
     private static void publish(ConsumerSettings settings, List<Event> events) throws Exception {
-        try (var publisher = DualKafkaPublisher.open(PublishConfig.defaults(settings.topic()), KAFKA.aProperties(), KAFKA.bProperties())) {
+        try (var replication = ReplicationFixture.start(settings.topic(), KAFKA.aProperties(), KAFKA.bProperties());
+             var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(settings.topic()), KAFKA.aProperties(), KAFKA.bProperties()))) {
             for (var event : events) {
-                assertTrue(publisher.send(event).toCompletableFuture().get(10, TimeUnit.SECONDS).successful());
+                assertEquals(io.github.keemgdeok.kafkaactiveactive.publish.PublishResult.Status.CONFIRMED,
+                        publisher.send(event).toCompletableFuture().get(10, TimeUnit.SECONDS).status());
             }
         }
     }

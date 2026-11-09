@@ -21,7 +21,9 @@ import io.github.keemgdeok.kafkaactiveactive.consume.CommitResult;
 import io.github.keemgdeok.kafkaactiveactive.consume.ConsumerSettings;
 import io.github.keemgdeok.kafkaactiveactive.consume.GroupTransition;
 import io.github.keemgdeok.kafkaactiveactive.environment.KafkaTopologyVerifier;
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationConfig;
+import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationService;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventAudit;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventDataset;
@@ -64,8 +66,10 @@ public final class DemoMain {
         var calls = new ConcurrentHashMap<String, AtomicInteger>();
         var completed = ConcurrentHashMap.<String>newKeySet();
         boolean brokerStopped = false;
-        try (var evidence = new JsonlEvidence(Path.of("build", "reports", "demo", "events.jsonl"));
+        try (var replication = new ReplicationService(ReplicationConfig.defaults(topic), a, b);
+             var evidence = new JsonlEvidence(Path.of("build", "reports", "demo", "events.jsonl"));
              var executor = Executors.newSingleThreadExecutor()) {
+            replication.start();
             evidence.record("start", Map.of("topic", topic, "group", settings.groupId(), "seed", seed,
                     "cluster_a", topology.clusterAId(), "cluster_b", topology.clusterBId()));
             Future<?> worker = executor.submit(() -> {
@@ -92,7 +96,7 @@ public final class DemoMain {
             try {
                 await(ready::get, worker);
                 var publishConfig = new PublishConfig(topic, Duration.ofSeconds(2), 128, 900_000, Duration.ofSeconds(3));
-                try (var publisher = DualKafkaPublisher.open(publishConfig, a, b)) {
+                try (var publisher = RoutedKafkaPublisher.open(publishConfig, a, b)) {
                     for (int i = 0; i < events.size(); i++) {
                         if (project != null && i == count / 3) {
                             compose(project, "stop", "kafka-a");

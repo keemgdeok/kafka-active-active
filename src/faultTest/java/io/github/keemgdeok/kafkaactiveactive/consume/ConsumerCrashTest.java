@@ -12,7 +12,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Stream;
 
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 import io.github.keemgdeok.kafkaactiveactive.support.CrashProcess;
 import io.github.keemgdeok.kafkaactiveactive.support.FaultSeeds;
@@ -28,6 +29,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+@SuppressWarnings("try")
 class ConsumerCrashTest {
     private static final KafkaPair KAFKA = new KafkaPair("fault-consumer-brokers");
     @BeforeAll static void start() { KAFKA.start(); }
@@ -45,7 +47,8 @@ class ConsumerCrashTest {
         try (var evidence = new JsonlEvidence(Path.of("build/reports/faultTest", "consumer-" + seed + "-" + point + ".jsonl"))) {
             evidence.record("scenario", Map.of("seed", seed, "topic", topic, "group", settings.groupId(), "fault_point", point,
                     "partition", events.getFirst().partition(), "operation_timeout_ms", settings.operationTimeout().toMillis()));
-            try (var publisher = DualKafkaPublisher.open(PublishConfig.defaults(topic), KAFKA.aProperties(), KAFKA.bProperties())) {
+            try (var replication = ReplicationFixture.start(topic, KAFKA.aProperties(), KAFKA.bProperties());
+                 var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), KAFKA.aProperties(), KAFKA.bProperties()))) {
                 var result = publisher.send(events.getFirst()).toCompletableFuture().get(10, TimeUnit.SECONDS);
                 assertTrue(result.successful());
                 evidence.record("attempt", Map.of("seed", seed, "event_id", result.eventId(), "status", result.status()));

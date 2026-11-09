@@ -89,6 +89,11 @@ public final class KafkaAccess implements AutoCloseable {
         config.put("isolation.level", "read_committed");
         config.put("allow.auto.create.topics", false);
         config.put("max.poll.records", batch);
+        // A crashed/unreachable member must not delay each reconnect by the native 45s default.
+        // Match the SDK application consumer defaults; callers can tune their broker's session bounds.
+        config.putIfAbsent("session.timeout.ms", 6_000);
+        config.putIfAbsent("heartbeat.interval.ms", 500);
+        config.putIfAbsent("max.poll.interval.ms", 120_000);
         config.put("fetch.max.bytes", 16 * 1024 * 1024);
         config.put("max.partition.fetch.bytes", maxEventBytes + 1_024);
         config.put("default.api.timeout.ms", (int) timeout.toMillis());

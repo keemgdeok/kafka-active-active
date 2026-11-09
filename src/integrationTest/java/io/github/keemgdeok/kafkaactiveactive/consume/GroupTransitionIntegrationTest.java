@@ -22,7 +22,8 @@ import java.util.function.BooleanSupplier;
 import java.util.stream.Stream;
 
 import io.github.keemgdeok.kafkaactiveactive.demo.DemoMain;
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 import io.github.keemgdeok.kafkaactiveactive.repair.RepairException;
@@ -41,6 +42,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+@SuppressWarnings("try")
 class GroupTransitionIntegrationTest {
     private static final KafkaPair KAFKA = new KafkaPair("group-brokers");
     @BeforeAll static void start() { KAFKA.start(); }
@@ -288,7 +290,8 @@ class GroupTransitionIntegrationTest {
         return new ConsumerSettings(topic, "group-" + UUID.randomUUID(), Duration.ofSeconds(5), 100, 1_000, 1_000_000, 1_024);
     }
     private static void publish(ConsumerSettings settings, int count, String prefix) throws Exception {
-        try (var publisher = DualKafkaPublisher.open(PublishConfig.defaults(settings.topic()), KAFKA.aProperties(), KAFKA.bProperties())) {
+        try (var replication = ReplicationFixture.start(settings.topic(), KAFKA.aProperties(), KAFKA.bProperties());
+             var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(settings.topic()), KAFKA.aProperties(), KAFKA.bProperties()))) {
             for (int i = 0; i < count; i++) {
                 assertTrue(publisher.send(new Event(prefix + i, i % 2 == 0 ? "kafka" : "hello", new byte[] {(byte) i}))
                         .toCompletableFuture().get(10, TimeUnit.SECONDS).successful());

@@ -17,7 +17,8 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.stream.IntStream;
 
 import eu.rekawek.toxiproxy.model.ToxicDirection;
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishResult;
@@ -34,6 +35,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+@SuppressWarnings("try")
 class NetworkFaultTest {
     private static final ProxyKafkaPair KAFKA = new ProxyKafkaPair();
     @BeforeAll static void start() throws Exception { KAFKA.start(); }
@@ -50,19 +52,20 @@ class NetworkFaultTest {
             evidence.record("scenario", Map.of("seed", seed, "topic", topic, "events", events.size(), "hot_key", true,
                     "response_timeout_ms", config.timeout().toMillis(), "max_pending", config.maxPending(),
                     "kafka_version", "4.3.2", "toxiproxy_version", "2.12.0"));
-            try (var publisher = DualKafkaPublisher.open(config, KAFKA.aProxied(), KAFKA.bProxied())) {
+            try (var replication = ReplicationFixture.start(topic, KAFKA.aProxied(), KAFKA.bProxied());
+                 var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(config, KAFKA.aProxied(), KAFKA.bProxied()))) {
                 assertEquals(PublishResult.Status.CONFIRMED, send(publisher, events.get(0), outcomes, evidence).status());
                 assertEquals(PublishResult.Status.CONFIRMED, send(publisher, events.get(1), outcomes, evidence).status());
-                KAFKA.proxyA.toxics().timeout("lose-a-responses", ToxicDirection.DOWNSTREAM, 0);
+                KAFKA.proxyB.toxics().timeout("lose-b-responses", ToxicDirection.DOWNSTREAM, 0);
                 var lost = send(publisher, events.get(2), outcomes, evidence);
                 assertEquals(PublishResult.Status.ACCEPTED_DEGRADED, lost.status());
-                // A direct observer sees the append even though this producer cannot see A's ACK.
-                EventAudit.read(KAFKA.aDirect(), List.of(topic), events.subList(0, 3)).requireComplete();
-                KAFKA.proxyB.toxics().timeout("lose-b-responses", ToxicDirection.DOWNSTREAM, 0);
+                // The hot key routes to B.P1. B stored the RAW although its ACK was lost; A ACKed fallback.
+                EventAudit.read(KAFKA.bDirect(), List.of(topic), events.subList(0, 3)).requireComplete();
+                KAFKA.proxyA.toxics().timeout("lose-a-responses", ToxicDirection.DOWNSTREAM, 0);
                 var unknown = send(publisher, events.get(3), outcomes, evidence);
                 assertEquals(PublishResult.Status.UNKNOWN, unknown.status());
-                assertFalse(EventAudit.read(KAFKA.bDirect(), List.of(topic), events.subList(0, 4)).missingIds().contains(unknown.eventId()),
-                        "UNKNOWN is not evidence of rejection; B stored this input");
+                assertFalse(EventAudit.read(KAFKA.aDirect(), List.of(topic), events.subList(0, 4)).missingIds().contains(unknown.eventId()),
+                        "UNKNOWN is not rejection: fallback A stored this input without a visible ACK");
                 KAFKA.heal();
                 awaitDrained(publisher);
                 // Healing the proxy does not instantly refresh an existing producer's metadata.
@@ -157,7 +160,7 @@ class NetworkFaultTest {
     private static ConsumerSettings settings(String topic) {
         return new ConsumerSettings(topic, "group-" + UUID.randomUUID(), Duration.ofSeconds(3), 100, 1_000, 1_000_000, 1_024);
     }
-    private static PublishResult send(DualKafkaPublisher publisher, Event event, List<PublishResult> outcomes,
+    private static PublishResult send(RoutedKafkaPublisher publisher, Event event, List<PublishResult> outcomes,
                                        JsonlEvidence evidence) throws Exception {
         long start = System.nanoTime();
         var result = publisher.send(event).toCompletableFuture().get(8, TimeUnit.SECONDS);
@@ -168,7 +171,7 @@ class NetworkFaultTest {
                 "elapsed_ms", (System.nanoTime() - start) / 1_000_000));
         return result;
     }
-    private static void awaitDrained(DualKafkaPublisher publisher) {
+    private static void awaitDrained(RoutedKafkaPublisher publisher) {
         long deadline = System.nanoTime() + Duration.ofSeconds(8).toNanos();
         while (publisher.pendingRequests() > 0 && System.nanoTime() < deadline) { LockSupport.parkNanos(Duration.ofMillis(20).toNanos()); }
         assertEquals(0, publisher.pendingRequests());

@@ -19,7 +19,8 @@ import java.util.concurrent.locks.LockSupport;
 
 import io.github.keemgdeok.kafkaactiveactive.environment.KafkaTopologyVerifier;
 import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishResult;
@@ -40,6 +41,7 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.Test;
 
 /** Correctness comparison, not a throughput/p99 benchmark or an external-sink exactly-once claim. */
+@SuppressWarnings("try")
 class MirrorMakerComparisonTest {
     @Test void sameInputsSurviveOutageAndMm2TranslatesAnInactiveGroupsOriginOffsets() throws Exception {
         int count = Integer.parseInt(System.getProperty("kaa.baseline.count", "24"));
@@ -72,7 +74,8 @@ class MirrorMakerComparisonTest {
     private static Result sdk(MirrorEnvironment environment, String topic, List<Event> events, JsonlEvidence evidence) throws Exception {
         int warm = events.size() / 3;
         long resumed;
-        try (var publisher = DualKafkaPublisher.open(PublishConfig.defaults(topic), environment.aProperties(), environment.bProperties())) {
+        try (var replication = ReplicationFixture.start(topic, environment.aProperties(), environment.bProperties());
+             var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), environment.aProperties(), environment.bProperties()))) {
             for (var event : events.subList(0, warm)) {
                 assertEquals(PublishResult.Status.CONFIRMED, sdkSend(publisher, event, evidence).status());
             }
@@ -208,7 +211,7 @@ class MirrorMakerComparisonTest {
             if (ownedByA) { originsA.add(event); }
         }
     }
-    private static PublishResult sdkSend(DualKafkaPublisher publisher, Event event, JsonlEvidence evidence) throws Exception {
+    private static PublishResult sdkSend(RoutedKafkaPublisher publisher, Event event, JsonlEvidence evidence) throws Exception {
         var result = publisher.send(event).toCompletableFuture().get(10, TimeUnit.SECONDS); recordSdk(result, evidence); return result;
     }
     private static void recordSdk(PublishResult result, JsonlEvidence evidence) {
