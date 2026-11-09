@@ -5,7 +5,11 @@ import java.util.Objects;
 
 /** Bounds apply to admitted requests, including requests still pending after a response timeout. */
 public record PublishConfig(String topic, Duration timeout, int maxPending, int maxEventBytes,
-                            Duration closeTimeout) {
+                            Duration closeTimeout, Duration preferredAckTimeout) {
+    public PublishConfig(String topic, Duration timeout, int maxPending, int maxEventBytes, Duration closeTimeout) {
+        this(topic, timeout, maxPending, maxEventBytes, closeTimeout,
+                Duration.ofNanos(Math.min(Duration.ofSeconds(1).toNanos(), timeout.toNanos() / 3)));
+    }
     public PublishConfig {
         if (topic == null || !topic.matches("[a-zA-Z0-9._-]{1,249}")
                 || topic.equals(".") || topic.equals("..")) {
@@ -13,6 +17,11 @@ public record PublishConfig(String topic, Duration timeout, int maxPending, int 
         }
         requireDuration(timeout, "timeout");
         requireDuration(closeTimeout, "closeTimeout");
+        Objects.requireNonNull(preferredAckTimeout, "preferredAckTimeout");
+        if (preferredAckTimeout.isZero() || preferredAckTimeout.isNegative()
+                || preferredAckTimeout.compareTo(timeout) >= 0) {
+            throw new IllegalArgumentException("preferredAckTimeout must be positive and less than timeout");
+        }
         if (maxPending < 1 || maxEventBytes < 1 || maxEventBytes > 16 * 1024 * 1024) {
             throw new IllegalArgumentException("maxPending must be positive; maxEventBytes must be 1..16MiB");
         }
