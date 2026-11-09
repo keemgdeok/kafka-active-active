@@ -33,6 +33,19 @@ public final class NativeLog {
             return List.copyOf(records);
         } finally { reader.close(CloseOptions.timeout(Duration.ZERO)); }
     }
+    /** EndTxn acknowledgement and read_committed visibility are not one observer snapshot. */
+    public static List<ConsumerRecord<byte[], byte[]>> awaitVisibleCount(Map<String, Object> properties,
+                                                                         String topic, int expected) {
+        long end = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        List<ConsumerRecord<byte[], byte[]>> records;
+        do {
+            records = read(properties, topic);
+            if (records.size() > expected) { throw new AssertionError("unexpected committed records: " + records.size()); }
+            if (records.size() == expected) { return records; }
+            java.util.concurrent.locks.LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+        } while (System.nanoTime() < end);
+        throw new AssertionError("committed records did not become visible: " + records.size() + "/" + expected);
+    }
     public static void write(Map<String, Object> properties, ProducerRecord<byte[], byte[]> record) throws Exception {
         var writer = new KafkaProducer<byte[], byte[]>(KafkaAccess.writer(properties, Duration.ofSeconds(5), 900_000));
         try { writer.send(record).get(10, TimeUnit.SECONDS); }

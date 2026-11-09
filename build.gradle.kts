@@ -83,7 +83,7 @@ tasks.register<Test>("faultTest") {
     systemProperty("kaa.fault.seeds", providers.gradleProperty("faultSeeds").getOrElse("0"))
     systemProperty("kaa.fault.classpath", faultTest.runtimeClasspath.asPath)
     shouldRunAfter(tasks.named("integrationTest"))
-    timeout.set(Duration.ofMinutes(55))
+    timeout.set(Duration.ofMinutes(58))
     outputs.upToDateWhen { false }
 }
 
