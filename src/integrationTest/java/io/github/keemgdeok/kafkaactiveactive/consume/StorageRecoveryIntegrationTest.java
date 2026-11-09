@@ -23,6 +23,9 @@ import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishResult;
 import io.github.keemgdeok.kafkaactiveactive.support.KafkaPair;
 import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
+import io.github.keemgdeok.kafkaactiveactive.support.NativeLog;
+import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationConfig;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventAudit;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventDataset;
 import io.github.keemgdeok.kafkaactiveactive.verification.JsonlEvidence;
@@ -48,11 +51,16 @@ class StorageRecoveryIntegrationTest {
              var evidence = new JsonlEvidence(diagnostics.resolve("events.jsonl"))) {
             pin(pair.a, port); pair.start(); pair.createTopic(topic);
             Map<String, Object> originalAddress = pair.aProperties();
+            String oldBToAGroup;
             try (var replication = ReplicationFixture.start(topic, originalAddress, pair.bProperties());
                  var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), originalAddress, pair.bProperties()))) {
                 for (var event : events) { assertEquals(PublishResult.Status.CONFIRMED,
                         publisher.send(event).toCompletableFuture().get(10, TimeUnit.SECONDS).status()); }
+                var direction=replication.status().bToA();
+                oldBToAGroup=ReplicationConfig.defaults(topic).groupId(direction.source(),direction.target());
             }
+            var oldBRecords=NativeLog.read(pair.bProperties(),topic);
+            long oldBRaws=oldBRecords.stream().filter(r -> EventCodec.kind(r)==EventCodec.Kind.RAW).count();
             var old = new ActiveKafkaConsumer(settings, originalAddress, pair.bProperties());
             try (old) {
                 long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
@@ -100,6 +108,20 @@ class StorageRecoveryIntegrationTest {
                 assertTrue(target.status().filteredRecords() >= events.size()); assertEquals(0, target.status().deliveredEvents());
                 try (var replication = ReplicationFixture.start(topic, restoredAddress, pair.bProperties());
                  var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), restoredAddress, pair.bProperties()))) {
+                    var direction=replication.status().bToA();
+                    String newGroup=ReplicationConfig.defaults(topic).groupId(direction.source(),direction.target());
+                    assertNotEquals(oldBToAGroup,newGroup,"surviving source reused progress for replaced target storage");
+                    long replayBy=System.nanoTime()+Duration.ofSeconds(20).toNanos();
+                    while(replication.status().bToA().replicatedRecords()<oldBRaws && System.nanoTime()<replayBy) {
+                        java.util.concurrent.locks.LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+                    }
+                    assertEquals(oldBRaws,replication.status().bToA().replicatedRecords(),"new namespace must replay retained RAWs");
+                    try(var admin=Admin.create(pair.bProperties())) {
+                        var offsets=admin.listConsumerGroupOffsets(newGroup).partitionsToOffsetAndMetadata().get(5,TimeUnit.SECONDS);
+                        assertEquals(oldBRecords.size(),offsets.values().stream().mapToLong(org.apache.kafka.clients.consumer.OffsetAndMetadata::offset).sum());
+                    }
+                    evidence.record("replication_generation",Map.of("old_group",oldBToAGroup,"new_group",newGroup,
+                            "old_raws_replayed",oldBRaws,"target",direction.target()));
                     assertEquals(PublishResult.Status.CONFIRMED, publisher.send(fresh).toCompletableFuture().get(10, TimeUnit.SECONDS).status());
                 }
                 var batch = awaitBatch(target);

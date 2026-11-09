@@ -157,6 +157,50 @@ class NetworkFaultTest {
                     "key_order_inversions_b", b.keyOrderInversions()));
         } finally { KAFKA.heal(); }
     }
+    @ParameterizedTest(name="seed={0} publisher receipt path isolated") @MethodSource("seeds")
+    void readerDisconnectionCannotInventConfirmationOrReusePriorAttempt(int seed) throws Exception {
+        String topic="reader-cut-"+UUID.randomUUID(); KAFKA.createTopic(topic);
+        var warm=new Event("reader-warm-"+seed,"hello",new byte[]{0});
+        var event=new Event("reader-event-"+seed,"hello",new byte[]{(byte)seed,1});
+        var config=new PublishConfig(topic,Duration.ofSeconds(3),8,1_024,Duration.ofSeconds(5));
+        var replication=ReplicationFixture.start(topic,KAFKA.aDirect(),KAFKA.bDirect());
+        try(var evidence=new JsonlEvidence(Path.of("build/reports/faultTest","reader-"+seed+".jsonl"));
+            var publisher=ReplicationFixture.ready(RoutedKafkaPublisher.open(config,KAFKA.aProxied(),KAFKA.bDirect()))) {
+            assertEquals(PublishResult.Status.CONFIRMED,publisher.send(warm).toCompletableFuture().get(8,TimeUnit.SECONDS).status());
+            KAFKA.proxyA.disable(); // Only publisher paths. The explicit worker still uses direct addresses.
+            var isolated=publisher.send(event).toCompletableFuture().get(8,TimeUnit.SECONDS);
+            assertEquals(PublishResult.Status.ACCEPTED_DEGRADED,isolated.status());
+            long end=System.nanoTime()+Duration.ofSeconds(15).toNanos();
+            while(replication.status().bToA().replicatedRecords()<2 && System.nanoTime()<end) {
+                LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+            }
+            assertEquals(2,replication.status().bToA().replicatedRecords());
+            var before=io.github.keemgdeok.kafkaactiveactive.support.NativeLog.read(KAFKA.aDirect(),topic);
+            assertEquals(2,before.size());
+            assertTrue(before.stream().allMatch(r -> io.github.keemgdeok.kafkaactiveactive.internal.EventCodec.kind(r)
+                    ==io.github.keemgdeok.kafkaactiveactive.internal.EventCodec.Kind.REPLICA));
+            evidence.record("reader_cut",Map.of("seed",seed,"status",isolated.status(),"native_peer_records",before.size(),
+                    "a_evidence",isolated.clusterA().evidence(),"b_evidence",isolated.clusterB().evidence()));
+            replication.close(); KAFKA.heal(); ReplicationFixture.ready(publisher);
+            var retry=publisher.send(event).toCompletableFuture().get(8,TimeUnit.SECONDS);
+            assertEquals(PublishResult.Status.ACCEPTED_DEGRADED,retry.status(),"old receipt confirmed a new RAW attempt");
+            assertEquals(2,io.github.keemgdeok.kafkaactiveactive.support.NativeLog.read(KAFKA.aDirect(),topic).size());
+            assertEquals(3,io.github.keemgdeok.kafkaactiveactive.support.NativeLog.read(KAFKA.bDirect(),topic).size());
+            try(var resumed=ReplicationFixture.start(topic,KAFKA.aDirect(),KAFKA.bDirect())) {
+                end=System.nanoTime()+Duration.ofSeconds(15).toNanos();
+                while(resumed.status().bToA().committedOffsets().getOrDefault(1,0L)<3 && System.nanoTime()<end) {
+                    LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+                }
+                assertEquals(3,resumed.status().bToA().committedOffsets().getOrDefault(1,0L));
+            }
+            EventAudit.read(KAFKA.aDirect(),List.of(topic),List.of(warm,event)).requireComplete();
+            EventAudit.read(KAFKA.bDirect(),List.of(topic),List.of(warm,event)).requireComplete();
+            assertEquals(PublishResult.Status.ACCEPTED_DEGRADED,isolated.status());
+            evidence.record("verified",Map.of("seed",seed,"missing",0,"old_receipt_reused",false,
+                    "extra_raw_on_peer",0,"immutable_degraded",true));
+        } finally { replication.close(); KAFKA.heal(); }
+    }
+
     private static ConsumerSettings settings(String topic) {
         return new ConsumerSettings(topic, "group-" + UUID.randomUUID(), Duration.ofSeconds(3), 100, 1_000, 1_000_000, 1_024);
     }
@@ -168,7 +212,8 @@ class NetworkFaultTest {
         evidence.record("attempt", Map.of("event_id", event.eventId(), "partition", event.partition(), "status", result.status(),
                 "a_delivery", result.clusterA().delivery(), "b_delivery", result.clusterB().delivery(),
                 "a_error", String.valueOf(result.clusterA().errorType()), "b_error", String.valueOf(result.clusterB().errorType()),
-                "elapsed_ms", (System.nanoTime() - start) / 1_000_000));
+                "elapsed_ms", (System.nanoTime() - start) / 1_000_000,
+                "a_evidence", result.clusterA().evidence(), "b_evidence", result.clusterB().evidence()));
         return result;
     }
     private static void awaitDrained(RoutedKafkaPublisher publisher) {

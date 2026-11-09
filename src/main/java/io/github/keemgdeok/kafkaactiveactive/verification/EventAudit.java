@@ -38,6 +38,7 @@ public final class EventAudit {
         Set<String> seen = new HashSet<>();
         Set<String> unexpected = new HashSet<>();
         Map<String, Integer> previous = new HashMap<>();
+        Map<String, Long> roles = new HashMap<>();
         long physical = 0;
         long conflicts = 0;
         long inversions = 0;
@@ -53,6 +54,7 @@ public final class EventAudit {
                     if (record.offset() >= ends.get(new TopicPartition(record.topic(), record.partition()))) { continue; }
                     physical++;
                     var identity = EventCodec.identity(record, 16 * 1024 * 1024);
+                    roles.merge(EventCodec.kind(record).name() + ".P" + record.partition(), 1L, Long::sum);
                     Event event = byId.get(identity.id());
                     if (event == null) { unexpected.add(identity.id()); continue; }
                     if (!Arrays.equals(event.payload(), record.value()) || !Arrays.equals(event.key().getBytes(StandardCharsets.UTF_8), record.key())
@@ -68,10 +70,11 @@ public final class EventAudit {
         }
         var missing = new HashSet<>(byId.keySet());
         missing.removeAll(seen);
-        return new Report(physical, seen.size(), Set.copyOf(missing), Set.copyOf(unexpected), conflicts, inversions);
+        return new Report(physical, seen.size(), Set.copyOf(missing), Set.copyOf(unexpected), conflicts, inversions, roles);
     }
     public record Report(long physicalRecords, int uniqueEvents, Set<String> missingIds,
-                          Set<String> unexpectedIds, long payloadConflicts, long keyOrderInversions) {
+                          Set<String> unexpectedIds, long payloadConflicts, long keyOrderInversions, Map<String, Long> recordsByKindAndPartition) {
+        public Report { recordsByKindAndPartition = Map.copyOf(recordsByKindAndPartition); }
         public void requireComplete() {
             if (!missingIds.isEmpty() || !unexpectedIds.isEmpty() || payloadConflicts != 0) {
                 throw new IllegalStateException("event audit failed: " + this);

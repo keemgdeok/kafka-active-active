@@ -97,7 +97,7 @@ public final class RepairService implements AutoCloseable {
                 scan(a, initialA, Map.of(0, 0L, 1, 0L), index, 0, deadline);
                 scan(b, initialB, Map.of(0, 0L, 1, 0L), index, 1, deadline);
 
-                // One finite tail refresh reduces races with delayed dual writes without chasing a moving tail.
+                // One finite tail refresh reduces races with delayed peer appends without chasing a moving tail.
                 var boundaryA = a.capture();
                 var boundaryB = b.capture();
                 initialA.requireContinuation(boundaryA);

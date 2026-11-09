@@ -86,6 +86,64 @@ class ConsumerCrashTest {
                     "target_handler_calls", calls, "completed_redeliveries", 0, "completed_ids_both", 1));
         }
     }
+    static Stream<Arguments> multiCases() {
+        return FaultSeeds.values().boxed().flatMap(seed -> Stream.of("FIRST_PARTITION_COMMITTED","ALL_PARTITIONS_COMMITTED")
+                .map(point -> Arguments.of(seed,point)));
+    }
+    @ParameterizedTest(name="seed={0} multi-partition-crash={1}") @MethodSource("multiCases")
+    void actualExitAfterPartitionCommitsPreservesOnlyFinishedIdsAcrossTransition(int seed,String point) throws Exception {
+        String topic="multi-crash-"+UUID.randomUUID(); KAFKA.createTopic(topic);
+        var settings=new ConsumerSettings(topic,"multi-group-"+UUID.randomUUID(),Duration.ofSeconds(5),100,1_000,1_000_000,1_024);
+        var events=ConsumerCrashChild.multiInput(seed);
+        try(var evidence=new JsonlEvidence(Path.of("build/reports/faultTest","consumer-multi-"+seed+"-"+point+".jsonl"))) {
+            try(var replication=ReplicationFixture.start(topic,KAFKA.aProperties(),KAFKA.bProperties());
+                var publisher=ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic),KAFKA.aProperties(),KAFKA.bProperties()))) {
+                for(var event:events) { assertEquals(io.github.keemgdeok.kafkaactiveactive.publish.PublishResult.Status.CONFIRMED,
+                        publisher.send(event).toCompletableFuture().get(10,TimeUnit.SECONDS).status()); }
+            }
+            CrashProcess.run(ConsumerCrashChild.class.getName(),"consumer-multi-"+seed+"-"+point,
+                    topic,settings.groupId(),KAFKA.a.getBootstrapServers(),KAFKA.b.getBootstrapServers(),point,Integer.toString(seed));
+            awaitEmpty(settings);
+            int partitions=point.equals("FIRST_PARTITION_COMMITTED")?1:2;
+            java.util.Set<String> completed;
+            try(var admin=Admin.create(KAFKA.aProperties());var ledger=new CompletionLedger(settings,KAFKA.aProperties())) {
+                var offsets=admin.listConsumerGroupOffsets(settings.groupId()).partitionsToOffsetAndMetadata().get(5,TimeUnit.SECONDS);
+                assertEquals(partitions,offsets.size());
+                assertTrue(offsets.values().stream().allMatch(o -> o.offset()==2));
+                completed=ledger.replay(ledger.snapshot()).markers().stream().map(CompletionMarker::id).collect(java.util.stream.Collectors.toSet());
+                assertEquals(2*partitions,completed.size());
+                assertEquals(completed,events.stream().filter(e -> offsets.containsKey(new org.apache.kafka.common.TopicPartition(topic,e.partition())))
+                        .map(io.github.keemgdeok.kafkaactiveactive.publish.Event::eventId).collect(java.util.stream.Collectors.toSet()));
+                evidence.record("halted",Map.of("seed",seed,"fault_point",point,"committed_partitions",partitions,
+                        "native_offsets",offsets,"completed_ids",completed));
+            }
+            var prepared=new GroupTransition(settings,KAFKA.aProperties(),KAFKA.bProperties(),() -> true).prepare();
+            assertEquals(completed.size(),prepared.completionReport().completedIds());
+            var calls=new java.util.HashSet<String>();
+            try(var target=prepared.startTarget()) {
+                long end=System.nanoTime()+Duration.ofSeconds(20).toNanos();
+                while(System.nanoTime()<end) {
+                    var batch=target.poll(Duration.ofMillis(100));
+                    for(var delivery:batch.records()) {
+                        assertTrue(events.contains(delivery.event())); assertTrue(!completed.contains(delivery.event().eventId()));
+                        assertTrue(calls.add(delivery.event().eventId()),"unfinished event delivered twice after completion");
+                    }
+                    if(!batch.isEmpty()) { assertEquals(CommitResult.Status.CONFIRMED,target.commit(batch.processed()).toCompletableFuture().join().status()); }
+                    if(target.status().completedIds()==4 && (calls.size()>0 || target.status().filteredRecords()>=4)) { break; }
+                }
+                assertEquals(4,target.status().completedIds());
+            }
+            assertEquals(4-completed.size(),calls.size());
+            EventAudit.read(KAFKA.aProperties(),List.of(topic),events).requireComplete();
+            EventAudit.read(KAFKA.bProperties(),List.of(topic),events).requireComplete();
+            for(var props:List.of(KAFKA.aProperties(),KAFKA.bProperties())) {
+                try(var ledger=new CompletionLedger(settings,props)) { assertEquals(4,ledger.replay(ledger.snapshot()).size()); }
+            }
+            evidence.record("verified",Map.of("seed",seed,"fault_point",point,"completed_redeliveries",0,
+                    "committed_partitions_before_exit",partitions,"target_handler_calls",calls.size(),"completed_ids_both",4));
+        }
+    }
+
     private static void awaitEmpty(ConsumerSettings settings) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
         try (Admin admin = Admin.create(KAFKA.aProperties())) {

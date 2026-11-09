@@ -215,13 +215,15 @@ class MirrorMakerComparisonTest {
         var result = publisher.send(event).toCompletableFuture().get(10, TimeUnit.SECONDS); recordSdk(result, evidence); return result;
     }
     private static void recordSdk(PublishResult result, JsonlEvidence evidence) {
-        evidence.record("sdk_ack", Map.of("event_id", result.eventId(), "status", result.status(), "a_delivery", result.clusterA().delivery(), "b_delivery", result.clusterB().delivery()));
+        evidence.record("sdk_ack", Map.of("event_id", result.eventId(), "status", result.status(), "a_delivery", result.clusterA().delivery(), "b_delivery", result.clusterB().delivery(),
+                "a_evidence", result.clusterA().evidence(), "b_evidence", result.clusterB().evidence()));
     }
     private static Result result(String implementation, EventAudit.Report a, EventAudit.Report b, long resumed, JsonlEvidence evidence) {
         var result = new Result((System.nanoTime() - resumed) / 1_000_000, a.physicalRecords(), b.physicalRecords());
         evidence.record("event_audit", Map.of("implementation", implementation, "unique_a", a.uniqueEvents(), "unique_b", b.uniqueEvents(),
                 "physical_a", a.physicalRecords(), "physical_b", b.physicalRecords(), "complete_after_resume_ms", result.completeAfterResumeMillis(),
-                "key_order_inversions_a", a.keyOrderInversions(), "key_order_inversions_b", b.keyOrderInversions()));
+                "key_order_inversions_a", a.keyOrderInversions(), "key_order_inversions_b", b.keyOrderInversions(),
+                "record_kinds_a", a.recordsByKindAndPartition(), "record_kinds_b", b.recordsByKindAndPartition()));
         return result;
     }
     private static String row(String implementation, int count, Result result, String subscriptionA, String subscriptionB) {

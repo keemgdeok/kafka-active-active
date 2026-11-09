@@ -112,7 +112,7 @@ class RepairServiceTest {
     }
 
     @Test
-    void finiteTailRefreshFindsLateDualWriteAndDoesNotCopyItAgain() {
+    void finiteTailRefreshFindsLatePeerAppendAndDoesNotCopyItAgain() {
         a.add("delayed", "kafka", "value");
         a.afterScan = () -> b.add("delayed", "kafka", "value");
         try (var repair = service(100, 100_000)) {

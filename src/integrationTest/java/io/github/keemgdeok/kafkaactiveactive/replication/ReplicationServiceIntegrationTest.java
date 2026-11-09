@@ -78,6 +78,28 @@ class ReplicationServiceIntegrationTest {
         }
     }
 
+    @Test void ongoingSameGenerationPrefixDeletionFailsBothDirectionsInsteadOfSilentlyContinuing() throws Exception {
+        String topic=topic();
+        write(PAIR.aProperties(),EventCodec.raw(topic,new Event("delete-prefix","kafka",new byte[]{1}),UUID.randomUUID()));
+        try(var service=new ReplicationService(serviceConfig(topic),PAIR.aProperties(),PAIR.bProperties())) {
+            service.start(); ready(service);
+            await(() -> service.status().aToB().committedOffsets().getOrDefault(0,0L)==1,service);
+            var before=service.status().aToB().source();
+            try(var admin=Admin.create(PAIR.aProperties())) {
+                admin.deleteRecords(Map.of(new TopicPartition(topic,0),org.apache.kafka.clients.admin.RecordsToDelete.beforeOffset(1)))
+                        .all().get(5,TimeUnit.SECONDS);
+            }
+            long end=System.nanoTime()+Duration.ofSeconds(10).toNanos();
+            while(System.nanoTime()<end && (service.status().aToB().state()!=ReplicationService.State.FAILED
+                    || service.status().bToA().state()!=ReplicationService.State.FAILED)) {
+                LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+            }
+            assertEquals(ReplicationService.State.FAILED,service.status().aToB().state());
+            assertEquals(ReplicationService.State.FAILED,service.status().bToA().state());
+            assertEquals(before,service.status().aToB().source(),"same UUID deletion is not a new log generation");
+        }
+    }
+
     @Test void rawsInFailoverPartitionsAreAlsoForwarded() throws Exception {
         String topic = topic();
         try (var service = new ReplicationService(ReplicationConfig.defaults(topic),

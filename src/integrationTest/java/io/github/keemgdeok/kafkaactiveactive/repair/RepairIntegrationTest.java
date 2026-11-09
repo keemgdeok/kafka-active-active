@@ -43,7 +43,6 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.kafka.KafkaContainer;
 import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
-import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 
@@ -242,8 +241,9 @@ class RepairIntegrationTest {
         write(A, topic, List.of(event("seed", "kafka")));
         AtomicInteger generated = new AtomicInteger();
         RepairReport report;
-        try (var replication = ReplicationFixture.start(topic, properties(A), properties(B));
-             var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), properties(A), properties(B)))) {
+        // No streaming worker: the capture hook must introduce genuinely one-sided RAWs.
+        var publishConfig=new PublishConfig(topic,Duration.ofSeconds(1),16,900_000,Duration.ofSeconds(2),Duration.ofMillis(900));
+        try (var publisher = RoutedKafkaPublisher.open(publishConfig, properties(A), properties(B))) {
             var config = RepairConfig.defaults(topic);
             try (var repair = new RepairService(config,
                     deadline -> new AdvancingLog(new KafkaRepairLog(config, properties(A), deadline), publisher, generated),
@@ -253,9 +253,10 @@ class RepairIntegrationTest {
             }
         }
         assertTrue(generated.get() > 0);
+        assertTrue(report.copiedToA()>0 && report.copiedToB()>0,"finite union must copy one-sided input in both directions");
         assertTrue(report.uniqueEvents() < generated.get() + 1, "live tail must remain beyond the finite boundary");
         try (var repair = service(topic)) {
-            repair.runOnce();
+            assertTrue(repair.runOnce().copiedToA()>0,"post-boundary RAWs must require the next repair");
             var repeated = repair.runOnce();
             assertEquals(0, repeated.copiedToA() + repeated.copiedToB());
         }

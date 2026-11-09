@@ -83,6 +83,45 @@ class ActiveKafkaConsumerIntegrationTest {
         }
     }
 
+    @Test void multiPartitionPartialFailureCommitsOnlyTheFinishedPartitionAndReplaysTheOther() throws Exception {
+        var settings = scenario();
+        var events = List.of(new Event("p0-one","kafka",new byte[]{1}), new Event("p0-two","kafka",new byte[]{2}),
+                new Event("p1-one","hello",new byte[]{3}),new Event("p1-two","hello",new byte[]{4}));
+        publish(settings,events);
+        var first = new java.util.concurrent.atomic.AtomicInteger(-1);
+        Set<String> completed;
+        try (var consumer = new ActiveKafkaConsumer(settings,KAFKA.aProperties(),KAFKA.bProperties(),(partition,point) -> {
+            if (point==ActiveKafkaConsumer.CommitPoint.LOCAL_COMMITTED) { first.compareAndSet(-1,partition); }
+            if (point==ActiveKafkaConsumer.CommitPoint.OFFSETS_STAGED && first.get()!=-1 && first.get()!=partition) {
+                throw new IllegalStateException("halt second partition before its commit");
+            }
+        })) {
+            var batch=awaitBatch(consumer); assertEquals(4,batch.records().size());
+            assertEquals(2,batch.records().stream().map(Batch.Delivery::partition).distinct().count());
+            var result=consumer.commit(batch.processed()).toCompletableFuture().join();
+            assertEquals(CommitResult.Status.UNKNOWN,result.status());
+            completed=events.stream().filter(e -> e.partition()==first.get()).map(Event::eventId).collect(java.util.stream.Collectors.toSet());
+            assertEquals(2,completed.size()); assertEquals(completed,result.locallyCompletedIds());
+            assertTrue(result.peerConfirmedIds().isEmpty());
+        }
+        try (var admin=Admin.create(KAFKA.aProperties())) {
+            var offsets=admin.listConsumerGroupOffsets(settings.groupId()).partitionsToOffsetAndMetadata().get(5,TimeUnit.SECONDS);
+            assertEquals(2,offsets.get(new TopicPartition(settings.topic(),first.get())).offset());
+            assertEquals(null,offsets.get(new TopicPartition(settings.topic(),1-first.get())),"unfinished partition offset skipped");
+        }
+        try (var consumer=consumer(settings)) {
+            var remaining=awaitBatch(consumer);
+            assertEquals(2,remaining.records().size());
+            assertTrue(remaining.records().stream().noneMatch(d -> completed.contains(d.event().eventId())));
+            assertEquals(CommitResult.Status.CONFIRMED,consumer.commit(remaining.processed()).toCompletableFuture().join().status());
+            assertEquals(4,consumer.status().completedIds());
+        }
+        new CompletionReplicator(settings,KAFKA.aProperties(),KAFKA.bProperties()).runOnce();
+        for(var properties:List.of(KAFKA.aProperties(),KAFKA.bProperties())) {
+            try(var ledger=new CompletionLedger(settings,properties)) { assertEquals(4,ledger.replay(ledger.snapshot()).size()); }
+        }
+    }
+
     @Test void failureBeforeTransactionCommitLeavesNeitherCompletionNorCommittedInputOffset() throws Exception {
         var settings = scenario();
         publish(settings, List.of(event("one", (byte) 1)));

@@ -111,7 +111,8 @@ public final class DemoMain {
                         var result = publisher.send(events.get(i)).toCompletableFuture().get(5, TimeUnit.SECONDS);
                         evidence.record("publish", Map.of("id", result.eventId(), "partition", result.partition(), "status", result.status(),
                                 "a_offset", result.clusterA().offset() == null ? "unconfirmed" : result.clusterA().offset(),
-                                "b_offset", result.clusterB().offset() == null ? "unconfirmed" : result.clusterB().offset()));
+                                "b_offset", result.clusterB().offset() == null ? "unconfirmed" : result.clusterB().offset(),
+                                "a_evidence", result.clusterA().evidence(), "b_evidence", result.clusterB().evidence()));
                         if (!result.successful()) { throw new IllegalStateException("input was not accepted: " + result); }
                     }
                 }
@@ -143,7 +144,8 @@ public final class DemoMain {
                 report.requireComplete();
                 evidence.record("audit", Map.of("cluster", entry.getKey(), "unique_events", report.uniqueEvents(),
                         "physical_records", report.physicalRecords(), "missing", report.missingIds().size(),
-                        "payload_conflicts", report.payloadConflicts(), "key_order_inversions", report.keyOrderInversions()));
+                        "payload_conflicts", report.payloadConflicts(), "key_order_inversions", report.keyOrderInversions(),
+                        "records_by_kind_partition", report.recordsByKindAndPartition()));
             }
             evidence.record("success", Map.of("accepted_events", count, "handler_calls", calls.size(), "completed_redeliveries", 0));
         }
