@@ -17,11 +17,12 @@ import java.util.concurrent.TimeUnit;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.PortBinding;
 import com.github.dockerjava.api.model.Ports;
-import io.github.keemgdeok.kafkaactiveactive.publish.DualKafkaPublisher;
+import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
 import io.github.keemgdeok.kafkaactiveactive.publish.PublishResult;
 import io.github.keemgdeok.kafkaactiveactive.support.KafkaPair;
+import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventAudit;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventDataset;
 import io.github.keemgdeok.kafkaactiveactive.verification.JsonlEvidence;
@@ -30,6 +31,7 @@ import org.apache.kafka.clients.admin.NewTopic;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.kafka.KafkaContainer;
 
+@SuppressWarnings("try")
 class StorageRecoveryIntegrationTest {
     @Test void replacingStorageRestoresBothDataAndCompletionsBeforeNewInputIsDelivered() throws Exception {
         int port;
@@ -46,7 +48,8 @@ class StorageRecoveryIntegrationTest {
              var evidence = new JsonlEvidence(diagnostics.resolve("events.jsonl"))) {
             pin(pair.a, port); pair.start(); pair.createTopic(topic);
             Map<String, Object> originalAddress = pair.aProperties();
-            try (var publisher = DualKafkaPublisher.open(PublishConfig.defaults(topic), originalAddress, pair.bProperties())) {
+            try (var replication = ReplicationFixture.start(topic, originalAddress, pair.bProperties());
+                 var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), originalAddress, pair.bProperties()))) {
                 for (var event : events) { assertEquals(PublishResult.Status.CONFIRMED,
                         publisher.send(event).toCompletableFuture().get(10, TimeUnit.SECONDS).status()); }
             }
@@ -95,7 +98,8 @@ class StorageRecoveryIntegrationTest {
                     assertTrue(target.poll(Duration.ofMillis(100)).isEmpty(), "completed ID reached handler after storage replacement");
                 }
                 assertTrue(target.status().filteredRecords() >= events.size()); assertEquals(0, target.status().deliveredEvents());
-                try (var publisher = DualKafkaPublisher.open(PublishConfig.defaults(topic), restoredAddress, pair.bProperties())) {
+                try (var replication = ReplicationFixture.start(topic, restoredAddress, pair.bProperties());
+                 var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), restoredAddress, pair.bProperties()))) {
                     assertEquals(PublishResult.Status.CONFIRMED, publisher.send(fresh).toCompletableFuture().get(10, TimeUnit.SECONDS).status());
                 }
                 var batch = awaitBatch(target);

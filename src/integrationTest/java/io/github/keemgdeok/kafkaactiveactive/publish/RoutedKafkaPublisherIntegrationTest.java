@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.ServerSocket;
@@ -37,7 +39,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.kafka.KafkaContainer;
 
 @Testcontainers
-class DualKafkaPublisherIntegrationTest {
+@SuppressWarnings("try")
+class RoutedKafkaPublisherIntegrationTest {
     // apache/kafka:4.3.2 multi-platform manifest; use the digest form supported by Testcontainers.
     private static final String IMAGE = "apache/kafka@sha256:852a0d49fc4e656b022e7f23785411802c9a088c78a7c5e39f33969de9c227a7";
     @Container
@@ -77,7 +80,8 @@ class DualKafkaPublisherIntegrationTest {
         String topic = createTopic();
         List<Event> events = events(40);
         List<PublishResult> results;
-        try (var publisher = open(topic)) {
+        try (var replication = ReplicationFixture.start(topic, properties(A), properties(B));
+             var publisher = ReplicationFixture.ready(open(topic))) {
             results = publish(publisher, events);
             assertTrue(results.stream().allMatch(r -> r.status() == CONFIRMED));
         }
@@ -93,7 +97,7 @@ class DualKafkaPublisherIntegrationTest {
             assertArrayEquals(event.payload(), left.value());
             assertArrayEquals(left.key(), right.key());
             assertArrayEquals(left.value(), right.value());
-            assertArrayEquals(new byte[] {1}, left.headers().lastHeader(DualKafkaPublisher.FORMAT_HEADER).value());
+            assertArrayEquals(new byte[] {2}, left.headers().lastHeader(RoutedKafkaPublisher.FORMAT_HEADER).value());
         }
         for (var log : List.of(a, b)) {
             Map<String, Long> previous = new HashMap<>();
@@ -107,6 +111,41 @@ class DualKafkaPublisherIntegrationTest {
             assertEquals(a.get(result.eventId()).offset(), result.clusterA().offset());
             assertEquals(b.get(result.eventId()).offset(), result.clusterB().offset());
         }
+    }
+
+    @Test
+    void withoutReplicationOnlyPreferredRawExistsAndResumeCopiesSamePartitionWithoutLooping() throws Exception {
+        String topic = createTopic();
+        var events = events(2);
+        List<PublishResult> results;
+        try (var publisher = open(topic)) {
+            results = publish(publisher, events);
+            assertTrue(results.stream().allMatch(r -> r.status() == ACCEPTED_DEGRADED));
+        }
+        var rawA = read(A, topic, 1); var rawB = read(B, topic, 1);
+        assertEquals(events.get(0).eventId(), rawA.keySet().iterator().next());
+        assertEquals(events.get(1).eventId(), rawB.keySet().iterator().next());
+        assertEquals(EventCodec.Kind.RAW, EventCodec.kind(rawA.values().iterator().next()));
+        assertEquals(EventCodec.Kind.RAW, EventCodec.kind(rawB.values().iterator().next()));
+        try (var replication = ReplicationFixture.start(topic, properties(A), properties(B))) {
+            long end = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+            while ((replication.status().aToB().replicatedRecords() < 1
+                    || replication.status().bToA().replicatedRecords() < 1) && System.nanoTime() < end) {
+                java.util.concurrent.locks.LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+            }
+            assertEquals(1, replication.status().aToB().replicatedRecords());
+            assertEquals(1, replication.status().bToA().replicatedRecords());
+            var allA = read(A, topic, 2); var allB = read(B, topic, 2);
+            for (var event : events) {
+                assertEquals(event.partition(), allA.get(event.eventId()).partition());
+                assertEquals(event.partition(), allB.get(event.eventId()).partition());
+                assertEquals(event.partition() == 0 ? EventCodec.Kind.RAW : EventCodec.Kind.REPLICA,
+                        EventCodec.kind(allA.get(event.eventId())));
+                assertEquals(event.partition() == 1 ? EventCodec.Kind.RAW : EventCodec.Kind.REPLICA,
+                        EventCodec.kind(allB.get(event.eventId())));
+            }
+        }
+        assertTrue(results.stream().allMatch(r -> r.status() == ACCEPTED_DEGRADED), "returned evidence is immutable");
     }
 
     @Test
@@ -137,7 +176,8 @@ class DualKafkaPublisherIntegrationTest {
     @Test
     void runningPublisherContinuesWhenBrokerStopsAndConfirmsAfterItReturns() throws Exception {
         String topic = createTopic();
-        try (var publisher = open(topic)) {
+        try (var replication = ReplicationFixture.start(topic, properties(A), properties(B));
+             var publisher = ReplicationFixture.ready(open(topic))) {
             assertEquals(CONFIRMED, publisher.send(events(1).getFirst()).toCompletableFuture()
                     .get(15, TimeUnit.SECONDS).status());
             A.getDockerClient().stopContainerCmd(A.getContainerId()).withTimeout(5).exec();
@@ -150,14 +190,26 @@ class DualKafkaPublisherIntegrationTest {
                 A.getDockerClient().startContainerCmd(A.getContainerId()).exec();
                 awaitBroker(A);
             }
+            long readyBy = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+            while (System.nanoTime() < readyBy && (!publisher.status().clusterAConfirmationReady()
+                    || !publisher.status().clusterBConfirmationReady()
+                    || replication.status().aToB().state() != io.github.keemgdeok.kafkaactiveactive.replication.ReplicationService.State.RUNNING
+                    || replication.status().bToA().state() != io.github.keemgdeok.kafkaactiveactive.replication.ReplicationService.State.RUNNING)) {
+                java.util.concurrent.locks.LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+            }
+            assertTrue(publisher.status().clusterAConfirmationReady() && publisher.status().clusterBConfirmationReady());
+            assertEquals(io.github.keemgdeok.kafkaactiveactive.replication.ReplicationService.State.RUNNING, replication.status().aToB().state());
+            assertEquals(io.github.keemgdeok.kafkaactiveactive.replication.ReplicationService.State.RUNNING, replication.status().bToA().state());
             Event recovered = new Event("after-recovery", "hello", new byte[] {43});
             assertEquals(CONFIRMED, publisher.send(recovered).toCompletableFuture()
                     .get(15, TimeUnit.SECONDS).status());
         }
     }
 
-    private static DualKafkaPublisher open(String topic) {
-        return DualKafkaPublisher.open(new PublishConfig(topic, Duration.ofSeconds(8), 64, 900_000,
+    private static Map<String, Object> properties(KafkaContainer broker) { return Map.of("bootstrap.servers", broker.getBootstrapServers()); }
+
+    private static RoutedKafkaPublisher open(String topic) {
+        return RoutedKafkaPublisher.open(new PublishConfig(topic, Duration.ofSeconds(8), 64, 900_000,
                 Duration.ofSeconds(2)), Map.of("bootstrap.servers", A.getBootstrapServers()),
                 Map.of("bootstrap.servers", B.getBootstrapServers()));
     }
@@ -190,7 +242,7 @@ class DualKafkaPublisherIntegrationTest {
         return events;
     }
 
-    private static List<PublishResult> publish(DualKafkaPublisher publisher, List<Event> events) throws Exception {
+    private static List<PublishResult> publish(RoutedKafkaPublisher publisher, List<Event> events) throws Exception {
         List<CompletableFuture<PublishResult>> futures = events.stream()
                 .map(event -> publisher.send(event).toCompletableFuture()).toList();
         CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).get(15, TimeUnit.SECONDS);
@@ -201,7 +253,7 @@ class DualKafkaPublisherIntegrationTest {
         String topic = "publish-" + UUID.randomUUID();
         for (KafkaContainer broker : List.of(A, B)) {
             try (Admin admin = Admin.create(Map.of("bootstrap.servers", broker.getBootstrapServers()))) {
-                admin.createTopics(List.of(new NewTopic(topic, 2, (short) 1)))
+                admin.createTopics(List.of(new NewTopic(topic, 2, (short) 1).configs(Map.of("retention.ms", "-1", "retention.bytes", "-1"))))
                         .all().get(20, TimeUnit.SECONDS);
             }
         }
@@ -231,7 +283,7 @@ class DualKafkaPublisherIntegrationTest {
             while (partitions.stream().anyMatch(p -> consumer.position(p) < ends.get(p))
                     && System.nanoTime() - deadline < 0) {
                 for (var record : consumer.poll(Duration.ofMillis(200))) {
-                    String id = new String(record.headers().lastHeader(DualKafkaPublisher.EVENT_ID_HEADER).value(),
+                    String id = new String(record.headers().lastHeader(RoutedKafkaPublisher.EVENT_ID_HEADER).value(),
                             StandardCharsets.UTF_8);
                     assertEquals(null, records.put(id, record), "unexpected duplicate event ID");
                 }
