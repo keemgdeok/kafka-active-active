@@ -29,6 +29,7 @@ import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.repair.RepairConfig;
 import io.github.keemgdeok.kafkaactiveactive.repair.RepairService;
 import io.github.keemgdeok.kafkaactiveactive.support.KafkaPair;
+import io.github.keemgdeok.kafkaactiveactive.support.NativeLog;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -61,8 +62,8 @@ class ReplicationServiceIntegrationTest {
             }
             await(() -> service.status().aToB().committedOffsets().equals(Map.of(0, 1L, 1, 1L))
                     && service.status().bToA().committedOffsets().equals(Map.of(0, 1L, 1, 1L)), service);
-            var ackA = ReplicationAck.decode(read(PAIR.aProperties(), config.confirmationTopic()).getFirst(), 1_024);
-            var ackB = ReplicationAck.decode(read(PAIR.bProperties(), config.confirmationTopic()).getFirst(), 1_024);
+            var ackA = ReplicationAck.decode(NativeLog.awaitVisibleCount(PAIR.aProperties(), config.confirmationTopic(),1).getFirst(), 1_024);
+            var ackB = ReplicationAck.decode(NativeLog.awaitVisibleCount(PAIR.bProperties(), config.confirmationTopic(),1).getFirst(), 1_024);
             assertEquals(attemptX, ackA.attempt()); assertEquals(attemptY, ackB.attempt());
             assertEquals(service.status().aToB().source(), ackA.source());
             assertEquals(service.status().aToB().target(), ackA.target());
@@ -75,6 +76,28 @@ class ReplicationServiceIntegrationTest {
             assertEquals(Map.of(0, 1L, 1, 1L), restarted.status().bToA().committedOffsets());
             assertEquals(2, read(PAIR.aProperties(), topic).size());
             assertEquals(2, read(PAIR.bProperties(), topic).size());
+        }
+    }
+
+    @Test void ongoingSameGenerationPrefixDeletionFailsBothDirectionsInsteadOfSilentlyContinuing() throws Exception {
+        String topic=topic();
+        write(PAIR.aProperties(),EventCodec.raw(topic,new Event("delete-prefix","kafka",new byte[]{1}),UUID.randomUUID()));
+        try(var service=new ReplicationService(serviceConfig(topic),PAIR.aProperties(),PAIR.bProperties())) {
+            service.start(); ready(service);
+            await(() -> service.status().aToB().committedOffsets().getOrDefault(0,0L)==1,service);
+            var before=service.status().aToB().source();
+            try(var admin=Admin.create(PAIR.aProperties())) {
+                admin.deleteRecords(Map.of(new TopicPartition(topic,0),org.apache.kafka.clients.admin.RecordsToDelete.beforeOffset(1)))
+                        .all().get(5,TimeUnit.SECONDS);
+            }
+            long end=System.nanoTime()+Duration.ofSeconds(10).toNanos();
+            while(System.nanoTime()<end && (service.status().aToB().state()!=ReplicationService.State.FAILED
+                    || service.status().bToA().state()!=ReplicationService.State.FAILED)) {
+                LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+            }
+            assertEquals(ReplicationService.State.FAILED,service.status().aToB().state());
+            assertEquals(ReplicationService.State.FAILED,service.status().bToA().state());
+            assertEquals(before,service.status().aToB().source(),"same UUID deletion is not a new log generation");
         }
     }
 
@@ -149,7 +172,7 @@ class ReplicationServiceIntegrationTest {
                 }
             } finally { release.countDown(); }
             await(() -> service.status().aToB().committedOffsets().getOrDefault(0, 0L) == 1, service);
-            assertEquals(1, read(PAIR.aProperties(), config.confirmationTopic()).size());
+            assertEquals(1, NativeLog.awaitVisibleCount(PAIR.aProperties(), config.confirmationTopic(),1).size());
         } finally { release.countDown(); }
     }
 
@@ -288,7 +311,7 @@ class ReplicationServiceIntegrationTest {
             try {
                 assertEquals(3, firstBatchSize.get(), "fixture must exercise an actual partial batch");
                 assertEquals(1, read(PAIR.bProperties(), topic).size());
-                assertEquals(1, read(PAIR.aProperties(), config.confirmationTopic()).size());
+                assertEquals(1, NativeLog.awaitVisibleCount(PAIR.aProperties(), config.confirmationTopic(),1).size());
             } finally { release.countDown(); }
             await(() -> service.status().aToB().committedOffsets().getOrDefault(0, 0L) == 3, service);
             assertEquals(3, read(PAIR.bProperties(), topic).size(), "committed prefix must not be copied again");

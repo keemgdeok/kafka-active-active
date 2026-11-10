@@ -41,6 +41,12 @@ public final class KafkaAccess implements AutoCloseable {
         if (business) {
             requireConfig(topic, Map.of("cleanup.policy", "delete", "retention.ms", "-1",
                     "retention.bytes", "-1"), deadline);
+            var beginnings = await(admin.listOffsets(Map.of(
+                    new org.apache.kafka.common.TopicPartition(topic, 0), org.apache.kafka.clients.admin.OffsetSpec.earliest(),
+                    new org.apache.kafka.common.TopicPartition(topic, 1), org.apache.kafka.clients.admin.OffsetSpec.earliest())).all(), deadline);
+            if (beginnings.values().stream().anyMatch(offset -> offset.offset() != 0)) {
+                throw new IllegalStateException("business log beginning changed; full retained history required");
+            }
         }
         return new LogIdentity(await(admin.describeCluster().clusterId(), deadline), value.topicId().toString());
     }

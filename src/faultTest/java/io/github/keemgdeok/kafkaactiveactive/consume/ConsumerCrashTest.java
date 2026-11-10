@@ -32,6 +32,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 @SuppressWarnings("try")
 class ConsumerCrashTest {
     private static final KafkaPair KAFKA = new KafkaPair("fault-consumer-brokers");
+    private static final Map<String, String> INPUT_TOPICS = new java.util.HashMap<>();
     @BeforeAll static void start() { KAFKA.start(); }
     @AfterAll static void stop() throws Exception { KAFKA.close(); }
     static Stream<Arguments> cases() {
@@ -40,25 +41,25 @@ class ConsumerCrashTest {
     }
     @ParameterizedTest(name = "seed={0} crash={1}") @MethodSource("cases")
     void abruptCrashPreservesOffsetCompletionAtomicityAndSafeTransition(int seed, String point) throws Exception {
-        String topic = "crash-" + UUID.randomUUID();
-        KAFKA.createTopic(topic);
+        String topic = inputTopic(seed, false);
         var settings = new ConsumerSettings(topic, "group-" + UUID.randomUUID(), Duration.ofSeconds(5), 100, 1_000, 1_000_000, 1_024);
         var events = List.of(ConsumerCrashChild.input(seed));
         try (var evidence = new JsonlEvidence(Path.of("build/reports/faultTest", "consumer-" + seed + "-" + point + ".jsonl"))) {
             evidence.record("scenario", Map.of("seed", seed, "topic", topic, "group", settings.groupId(), "fault_point", point,
                     "partition", events.getFirst().partition(), "operation_timeout_ms", settings.operationTimeout().toMillis()));
-            try (var replication = ReplicationFixture.start(topic, KAFKA.aProperties(), KAFKA.bProperties());
-                 var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), KAFKA.aProperties(), KAFKA.bProperties()))) {
-                var result = publisher.send(events.getFirst()).toCompletableFuture().get(10, TimeUnit.SECONDS);
-                assertTrue(result.successful());
-                evidence.record("attempt", Map.of("seed", seed, "event_id", result.eventId(), "status", result.status()));
-            }
+            evidence.record("input", Map.of("seed", seed, "event_id", events.getFirst().eventId(),
+                    "status", "CONFIRMED", "shared_immutable_input", true));
             CrashProcess.run(ConsumerCrashChild.class.getName(), "consumer-" + seed + "-" + point,
                     topic, settings.groupId(), KAFKA.a.getBootstrapServers(), KAFKA.b.getBootstrapServers(), point, Integer.toString(seed));
-            awaitEmpty(settings);
             boolean completed = point.equals("LOCAL_COMMITTED");
+            if (completed) {
+                io.github.keemgdeok.kafkaactiveactive.support.NativeLog.awaitVisibleCount(
+                        KAFKA.aProperties(), settings.completionTopic(), 1);
+            }
+            releaseExitedChildMembershipAndAwaitEmpty(settings);
             try (Admin admin = Admin.create(KAFKA.aProperties())) {
-                var offsets = admin.listConsumerGroupOffsets(settings.groupId()).partitionsToOffsetAndMetadata().get(5, TimeUnit.SECONDS);
+                var offsets = completed ? awaitOffsets(admin, settings, 1, 1)
+                        : admin.listConsumerGroupOffsets(settings.groupId()).partitionsToOffsetAndMetadata().get(5, TimeUnit.SECONDS);
                 var offset = offsets.get(new org.apache.kafka.common.TopicPartition(topic, events.getFirst().partition()));
                 assertEquals(completed ? 1L : -1L, offset == null ? -1L : offset.offset());
             }
@@ -86,9 +87,105 @@ class ConsumerCrashTest {
                     "target_handler_calls", calls, "completed_redeliveries", 0, "completed_ids_both", 1));
         }
     }
-    private static void awaitEmpty(ConsumerSettings settings) throws Exception {
+    static Stream<Arguments> multiCases() {
+        return FaultSeeds.values().boxed().flatMap(seed -> Stream.of("FIRST_PARTITION_COMMITTED","ALL_PARTITIONS_COMMITTED")
+                .map(point -> Arguments.of(seed,point)));
+    }
+    @ParameterizedTest(name="seed={0} multi-partition-crash={1}") @MethodSource("multiCases")
+    void actualExitAfterPartitionCommitsPreservesOnlyFinishedIdsAcrossTransition(int seed,String point) throws Exception {
+        String topic=inputTopic(seed,true);
+        var settings=new ConsumerSettings(topic,"multi-group-"+UUID.randomUUID(),Duration.ofSeconds(5),100,1_000,1_000_000,1_024);
+        var events=ConsumerCrashChild.multiInput(seed);
+        try(var evidence=new JsonlEvidence(Path.of("build/reports/faultTest","consumer-multi-"+seed+"-"+point+".jsonl"))) {
+            evidence.record("scenario",Map.of("seed",seed,"topic",topic,"group",settings.groupId(),
+                    "fault_point",point,"shared_immutable_input",true,"input_events",events.size()));
+            CrashProcess.run(ConsumerCrashChild.class.getName(),"consumer-multi-"+seed+"-"+point,
+                    topic,settings.groupId(),KAFKA.a.getBootstrapServers(),KAFKA.b.getBootstrapServers(),point,Integer.toString(seed));
+            int partitions=point.equals("FIRST_PARTITION_COMMITTED")?1:2;
+            io.github.keemgdeok.kafkaactiveactive.support.NativeLog.awaitVisibleCount(
+                    KAFKA.aProperties(), settings.completionTopic(), 2*partitions);
+            releaseExitedChildMembershipAndAwaitEmpty(settings);
+            java.util.Set<String> completed;
+            try(var admin=Admin.create(KAFKA.aProperties());var ledger=new CompletionLedger(settings,KAFKA.aProperties())) {
+                var offsets=awaitOffsets(admin,settings,partitions,2);
+                assertEquals(partitions,offsets.size());
+                assertTrue(offsets.values().stream().allMatch(o -> o.offset()==2));
+                completed=ledger.replay(ledger.snapshot()).markers().stream().map(CompletionMarker::id).collect(java.util.stream.Collectors.toSet());
+                assertEquals(2*partitions,completed.size());
+                assertEquals(completed,events.stream().filter(e -> offsets.containsKey(new org.apache.kafka.common.TopicPartition(topic,e.partition())))
+                        .map(io.github.keemgdeok.kafkaactiveactive.publish.Event::eventId).collect(java.util.stream.Collectors.toSet()));
+                evidence.record("halted",Map.of("seed",seed,"fault_point",point,"committed_partitions",partitions,
+                        "native_offsets",offsets,"completed_ids",completed));
+            }
+            var prepared=new GroupTransition(settings,KAFKA.aProperties(),KAFKA.bProperties(),() -> true).prepare();
+            assertEquals(completed.size(),prepared.completionReport().completedIds());
+            var calls=new java.util.HashSet<String>();
+            try(var target=prepared.startTarget()) {
+                long end=System.nanoTime()+Duration.ofSeconds(20).toNanos();
+                while(System.nanoTime()<end) {
+                    var batch=target.poll(Duration.ofMillis(100));
+                    for(var delivery:batch.records()) {
+                        assertTrue(events.contains(delivery.event())); assertTrue(!completed.contains(delivery.event().eventId()));
+                        assertTrue(calls.add(delivery.event().eventId()),"unfinished event delivered twice after completion");
+                    }
+                    if(!batch.isEmpty()) { assertEquals(CommitResult.Status.CONFIRMED,target.commit(batch.processed()).toCompletableFuture().join().status()); }
+                    if(target.status().completedIds()==4 && (calls.size()>0 || target.status().filteredRecords()>=4)) { break; }
+                }
+                assertEquals(4,target.status().completedIds());
+            }
+            assertEquals(4-completed.size(),calls.size());
+            EventAudit.read(KAFKA.aProperties(),List.of(topic),events).requireComplete();
+            EventAudit.read(KAFKA.bProperties(),List.of(topic),events).requireComplete();
+            for(var props:List.of(KAFKA.aProperties(),KAFKA.bProperties())) {
+                try(var ledger=new CompletionLedger(settings,props)) { assertEquals(4,ledger.replay(ledger.snapshot()).size()); }
+            }
+            evidence.record("verified",Map.of("seed",seed,"fault_point",point,"completed_redeliveries",0,
+                    "committed_partitions_before_exit",partitions,"target_handler_calls",calls.size(),"completed_ids_both",4));
+        }
+    }
+
+    /** Input bytes are immutable; every crash still gets a fresh process, group and completion topic. */
+    private static String inputTopic(int seed, boolean multi) throws Exception {
+        String key=seed+":"+multi;
+        String existing=INPUT_TOPICS.get(key);
+        if(existing!=null) { return existing; }
+        String topic="consumer-input-"+UUID.randomUUID(); KAFKA.createTopic(topic);
+        var events=multi?ConsumerCrashChild.multiInput(seed):List.of(ConsumerCrashChild.input(seed));
+        try(var replication=ReplicationFixture.start(topic,KAFKA.aProperties(),KAFKA.bProperties());
+            var publisher=ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic),KAFKA.aProperties(),KAFKA.bProperties()))) {
+            for(var event:events) {
+                assertEquals(io.github.keemgdeok.kafkaactiveactive.publish.PublishResult.Status.CONFIRMED,
+                        publisher.send(event).toCompletableFuture().get(10,TimeUnit.SECONDS).status());
+            }
+        }
+        EventAudit.read(KAFKA.aProperties(),List.of(topic),events).requireComplete();
+        EventAudit.read(KAFKA.bProperties(),List.of(topic),events).requireComplete();
+        INPUT_TOPICS.put(key,topic);
+        return topic;
+    }
+
+    private static Map<org.apache.kafka.common.TopicPartition,org.apache.kafka.clients.consumer.OffsetAndMetadata>
+            awaitOffsets(Admin admin, ConsumerSettings settings, int partitions, long nextOffset) throws Exception {
+        long end=System.nanoTime()+Duration.ofSeconds(15).toNanos();
+        do {
+            var offsets=admin.listConsumerGroupOffsets(settings.groupId()).partitionsToOffsetAndMetadata().get(5,TimeUnit.SECONDS);
+            assertTrue(offsets.size()<=partitions,"unfinished partition committed");
+            assertTrue(offsets.values().stream().allMatch(o -> o.offset()<=nextOffset),"source skipped input");
+            if(offsets.size()==partitions && offsets.values().stream().allMatch(o -> o.offset()==nextOffset)) { return offsets; }
+            LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+        } while(System.nanoTime()<end);
+        throw new AssertionError("committed offsets did not become visible");
+    }
+
+    private static void releaseExitedChildMembershipAndAwaitEmpty(ConsumerSettings settings) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
         try (Admin admin = Admin.create(KAFKA.aProperties())) {
+            // The caller has already confirmed actual child OS exit via CrashProcess.
+            // Clear only its dead native membership; offsets/history are never reset here.
+            // Automatic rebalance/lease expiry remains covered by the integration suite.
+            admin.removeMembersFromConsumerGroup(settings.groupId(),
+                    new org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions())
+                    .all().get(5, TimeUnit.SECONDS);
             while (System.nanoTime() < deadline) {
                 try {
                     if (admin.describeConsumerGroups(List.of(settings.groupId())).all().get(5, TimeUnit.SECONDS)
