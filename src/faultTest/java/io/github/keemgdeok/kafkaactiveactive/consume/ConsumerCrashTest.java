@@ -32,6 +32,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 @SuppressWarnings("try")
 class ConsumerCrashTest {
     private static final KafkaPair KAFKA = new KafkaPair("fault-consumer-brokers");
+    private static final Map<String, String> INPUT_TOPICS = new java.util.HashMap<>();
     @BeforeAll static void start() { KAFKA.start(); }
     @AfterAll static void stop() throws Exception { KAFKA.close(); }
     static Stream<Arguments> cases() {
@@ -40,19 +41,14 @@ class ConsumerCrashTest {
     }
     @ParameterizedTest(name = "seed={0} crash={1}") @MethodSource("cases")
     void abruptCrashPreservesOffsetCompletionAtomicityAndSafeTransition(int seed, String point) throws Exception {
-        String topic = "crash-" + UUID.randomUUID();
-        KAFKA.createTopic(topic);
+        String topic = inputTopic(seed, false);
         var settings = new ConsumerSettings(topic, "group-" + UUID.randomUUID(), Duration.ofSeconds(5), 100, 1_000, 1_000_000, 1_024);
         var events = List.of(ConsumerCrashChild.input(seed));
         try (var evidence = new JsonlEvidence(Path.of("build/reports/faultTest", "consumer-" + seed + "-" + point + ".jsonl"))) {
             evidence.record("scenario", Map.of("seed", seed, "topic", topic, "group", settings.groupId(), "fault_point", point,
                     "partition", events.getFirst().partition(), "operation_timeout_ms", settings.operationTimeout().toMillis()));
-            try (var replication = ReplicationFixture.start(topic, KAFKA.aProperties(), KAFKA.bProperties());
-                 var publisher = ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic), KAFKA.aProperties(), KAFKA.bProperties()))) {
-                var result = publisher.send(events.getFirst()).toCompletableFuture().get(10, TimeUnit.SECONDS);
-                assertTrue(result.successful());
-                evidence.record("attempt", Map.of("seed", seed, "event_id", result.eventId(), "status", result.status()));
-            }
+            evidence.record("input", Map.of("seed", seed, "event_id", events.getFirst().eventId(),
+                    "status", "CONFIRMED", "shared_immutable_input", true));
             CrashProcess.run(ConsumerCrashChild.class.getName(), "consumer-" + seed + "-" + point,
                     topic, settings.groupId(), KAFKA.a.getBootstrapServers(), KAFKA.b.getBootstrapServers(), point, Integer.toString(seed));
             awaitEmpty(settings);
@@ -92,15 +88,12 @@ class ConsumerCrashTest {
     }
     @ParameterizedTest(name="seed={0} multi-partition-crash={1}") @MethodSource("multiCases")
     void actualExitAfterPartitionCommitsPreservesOnlyFinishedIdsAcrossTransition(int seed,String point) throws Exception {
-        String topic="multi-crash-"+UUID.randomUUID(); KAFKA.createTopic(topic);
+        String topic=inputTopic(seed,true);
         var settings=new ConsumerSettings(topic,"multi-group-"+UUID.randomUUID(),Duration.ofSeconds(5),100,1_000,1_000_000,1_024);
         var events=ConsumerCrashChild.multiInput(seed);
         try(var evidence=new JsonlEvidence(Path.of("build/reports/faultTest","consumer-multi-"+seed+"-"+point+".jsonl"))) {
-            try(var replication=ReplicationFixture.start(topic,KAFKA.aProperties(),KAFKA.bProperties());
-                var publisher=ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic),KAFKA.aProperties(),KAFKA.bProperties()))) {
-                for(var event:events) { assertEquals(io.github.keemgdeok.kafkaactiveactive.publish.PublishResult.Status.CONFIRMED,
-                        publisher.send(event).toCompletableFuture().get(10,TimeUnit.SECONDS).status()); }
-            }
+            evidence.record("scenario",Map.of("seed",seed,"topic",topic,"group",settings.groupId(),
+                    "fault_point",point,"shared_immutable_input",true,"input_events",events.size()));
             CrashProcess.run(ConsumerCrashChild.class.getName(),"consumer-multi-"+seed+"-"+point,
                     topic,settings.groupId(),KAFKA.a.getBootstrapServers(),KAFKA.b.getBootstrapServers(),point,Integer.toString(seed));
             awaitEmpty(settings);
@@ -144,9 +137,35 @@ class ConsumerCrashTest {
         }
     }
 
+    /** Input bytes are immutable; every crash still gets a fresh process, group and completion topic. */
+    private static String inputTopic(int seed, boolean multi) throws Exception {
+        String key=seed+":"+multi;
+        String existing=INPUT_TOPICS.get(key);
+        if(existing!=null) { return existing; }
+        String topic="consumer-input-"+UUID.randomUUID(); KAFKA.createTopic(topic);
+        var events=multi?ConsumerCrashChild.multiInput(seed):List.of(ConsumerCrashChild.input(seed));
+        try(var replication=ReplicationFixture.start(topic,KAFKA.aProperties(),KAFKA.bProperties());
+            var publisher=ReplicationFixture.ready(RoutedKafkaPublisher.open(PublishConfig.defaults(topic),KAFKA.aProperties(),KAFKA.bProperties()))) {
+            for(var event:events) {
+                assertEquals(io.github.keemgdeok.kafkaactiveactive.publish.PublishResult.Status.CONFIRMED,
+                        publisher.send(event).toCompletableFuture().get(10,TimeUnit.SECONDS).status());
+            }
+        }
+        EventAudit.read(KAFKA.aProperties(),List.of(topic),events).requireComplete();
+        EventAudit.read(KAFKA.bProperties(),List.of(topic),events).requireComplete();
+        INPUT_TOPICS.put(key,topic);
+        return topic;
+    }
+
     private static void awaitEmpty(ConsumerSettings settings) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
         try (Admin admin = Admin.create(KAFKA.aProperties())) {
+            // The caller has already confirmed actual child OS exit via CrashProcess.
+            // Clear only its dead native membership; offsets/history are never reset here.
+            // Automatic rebalance/lease expiry remains covered by the integration suite.
+            admin.removeMembersFromConsumerGroup(settings.groupId(),
+                    new org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions())
+                    .all().get(5, TimeUnit.SECONDS);
             while (System.nanoTime() < deadline) {
                 try {
                     if (admin.describeConsumerGroups(List.of(settings.groupId())).all().get(5, TimeUnit.SECONDS)
