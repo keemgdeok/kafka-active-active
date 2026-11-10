@@ -51,10 +51,15 @@ class ConsumerCrashTest {
                     "status", "CONFIRMED", "shared_immutable_input", true));
             CrashProcess.run(ConsumerCrashChild.class.getName(), "consumer-" + seed + "-" + point,
                     topic, settings.groupId(), KAFKA.a.getBootstrapServers(), KAFKA.b.getBootstrapServers(), point, Integer.toString(seed));
-            awaitEmpty(settings);
             boolean completed = point.equals("LOCAL_COMMITTED");
+            if (completed) {
+                io.github.keemgdeok.kafkaactiveactive.support.NativeLog.awaitVisibleCount(
+                        KAFKA.aProperties(), settings.completionTopic(), 1);
+            }
+            releaseExitedChildMembershipAndAwaitEmpty(settings);
             try (Admin admin = Admin.create(KAFKA.aProperties())) {
-                var offsets = admin.listConsumerGroupOffsets(settings.groupId()).partitionsToOffsetAndMetadata().get(5, TimeUnit.SECONDS);
+                var offsets = completed ? awaitOffsets(admin, settings, 1, 1)
+                        : admin.listConsumerGroupOffsets(settings.groupId()).partitionsToOffsetAndMetadata().get(5, TimeUnit.SECONDS);
                 var offset = offsets.get(new org.apache.kafka.common.TopicPartition(topic, events.getFirst().partition()));
                 assertEquals(completed ? 1L : -1L, offset == null ? -1L : offset.offset());
             }
@@ -96,11 +101,13 @@ class ConsumerCrashTest {
                     "fault_point",point,"shared_immutable_input",true,"input_events",events.size()));
             CrashProcess.run(ConsumerCrashChild.class.getName(),"consumer-multi-"+seed+"-"+point,
                     topic,settings.groupId(),KAFKA.a.getBootstrapServers(),KAFKA.b.getBootstrapServers(),point,Integer.toString(seed));
-            awaitEmpty(settings);
             int partitions=point.equals("FIRST_PARTITION_COMMITTED")?1:2;
+            io.github.keemgdeok.kafkaactiveactive.support.NativeLog.awaitVisibleCount(
+                    KAFKA.aProperties(), settings.completionTopic(), 2*partitions);
+            releaseExitedChildMembershipAndAwaitEmpty(settings);
             java.util.Set<String> completed;
             try(var admin=Admin.create(KAFKA.aProperties());var ledger=new CompletionLedger(settings,KAFKA.aProperties())) {
-                var offsets=admin.listConsumerGroupOffsets(settings.groupId()).partitionsToOffsetAndMetadata().get(5,TimeUnit.SECONDS);
+                var offsets=awaitOffsets(admin,settings,partitions,2);
                 assertEquals(partitions,offsets.size());
                 assertTrue(offsets.values().stream().allMatch(o -> o.offset()==2));
                 completed=ledger.replay(ledger.snapshot()).markers().stream().map(CompletionMarker::id).collect(java.util.stream.Collectors.toSet());
@@ -157,7 +164,20 @@ class ConsumerCrashTest {
         return topic;
     }
 
-    private static void awaitEmpty(ConsumerSettings settings) throws Exception {
+    private static Map<org.apache.kafka.common.TopicPartition,org.apache.kafka.clients.consumer.OffsetAndMetadata>
+            awaitOffsets(Admin admin, ConsumerSettings settings, int partitions, long nextOffset) throws Exception {
+        long end=System.nanoTime()+Duration.ofSeconds(15).toNanos();
+        do {
+            var offsets=admin.listConsumerGroupOffsets(settings.groupId()).partitionsToOffsetAndMetadata().get(5,TimeUnit.SECONDS);
+            assertTrue(offsets.size()<=partitions,"unfinished partition committed");
+            assertTrue(offsets.values().stream().allMatch(o -> o.offset()<=nextOffset),"source skipped input");
+            if(offsets.size()==partitions && offsets.values().stream().allMatch(o -> o.offset()==nextOffset)) { return offsets; }
+            LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
+        } while(System.nanoTime()<end);
+        throw new AssertionError("committed offsets did not become visible");
+    }
+
+    private static void releaseExitedChildMembershipAndAwaitEmpty(ConsumerSettings settings) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
         try (Admin admin = Admin.create(KAFKA.aProperties())) {
             // The caller has already confirmed actual child OS exit via CrashProcess.
