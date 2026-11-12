@@ -9,6 +9,14 @@ application {
     mainClass.set("io.github.keemgdeok.kafkaactiveactive.demo.DemoMain")
 }
 
+tasks.register<JavaExec>("runProducerExample") {
+    group = "application"
+    description = "Runs the producer example with an opt-in replication role."
+    mainClass.set("io.github.keemgdeok.kafkaactiveactive.demo.ProducerExample")
+    classpath = sourceSets.main.get().runtimeClasspath
+    standardInput = System.`in`
+}
+
 group = "io.github.keemgdeok"
 version = "0.1.0-SNAPSHOT"
 
