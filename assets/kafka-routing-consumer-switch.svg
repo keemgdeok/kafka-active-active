@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 520" role="img" aria-labelledby="title description">
+  <title id="title">Kafka active-active routing</title>
+  <desc id="description">The SDK routes RAW records to A.P0 and B.P1. It copies P0 from A to B and P1 from B to A. The consumer reads both partitions from Kafka A. The dashed path from Kafka B applies after a manual switch.</desc>
+  <style>
+    svg { font: 16px system-ui, sans-serif; }
+    text { fill: #24292f; text-anchor: middle; }
+    .card { fill: #f6f8fa; stroke: #8c959f; }
+    .line { fill: none; stroke: #57606a; stroke-width: 2; }
+    .tip { fill: #57606a; }
+    .title { font-size: 18px; font-weight: 650; }
+    .label { font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e6edf3; }
+      .card { fill: #161b22; stroke: #6e7681; }
+      .line { stroke: #8b949e; }
+      .tip { fill: #8b949e; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path class="tip" d="M0 0 8 4 0 8Z"/>
+    </marker>
+  </defs>
+
+  <rect class="card" x="284" y="14" width="232" height="46" rx="8"/>
+  <text class="title" x="400" y="43">Producer + SDK</text>
+  <path class="line" d="M400 60V88" marker-end="url(#arrow)"/>
+  <rect class="card" x="284" y="88" width="232" height="46" rx="8"/>
+  <text x="400" y="117">Key → partition</text>
+
+  <path class="line" d="M400 134V166H174V190 M400 166H626V190"/>
+  <text class="label" x="174" y="211">RAW → A.P0</text>
+  <text class="label" x="626" y="211">RAW → B.P1</text>
+  <path class="line" d="M174 223V251" marker-end="url(#arrow)"/>
+  <path class="line" d="M626 223V251" marker-end="url(#arrow)"/>
+
+  <rect class="card" x="54" y="251" width="240" height="132" rx="8"/>
+  <text class="title" x="174" y="280">Kafka A</text>
+  <text x="174" y="319">P0 · RAW</text>
+  <text x="174" y="360">P1 · REPLICA</text>
+  <rect class="card" x="506" y="251" width="240" height="132" rx="8"/>
+  <text class="title" x="626" y="280">Kafka B</text>
+  <text x="626" y="319">P0 · REPLICA</text>
+  <text x="626" y="360">P1 · RAW</text>
+
+  <text class="label" x="400" y="303">SDK copy · P0</text>
+  <path class="line" d="M294 314H506" stroke-dasharray="5 5" marker-end="url(#arrow)"/>
+  <text class="label" x="400" y="344">SDK copy · P1</text>
+  <path class="line" d="M506 355H294" stroke-dasharray="5 5" marker-end="url(#arrow)"/>
+
+  <text class="label" x="259" y="405">Active</text>
+  <path class="line" d="M174 383V416H344V441" marker-end="url(#arrow)"/>
+  <text class="label" x="541" y="405">After manual switch</text>
+  <path class="line" d="M626 383V416H456V441" stroke-dasharray="5 5" marker-end="url(#arrow)"/>
+  <rect class="card" x="284" y="441" width="232" height="64" rx="8"/>
+  <text class="title" x="400" y="468">Consumer + SDK</text>
+  <text class="label" x="400" y="491">P0 + P1</text>
+</svg>
