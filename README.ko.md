@@ -52,8 +52,9 @@ var resultStage = publisher.send(new Event(eventId, key, payloadBytes));
 | 접속 설정 | A/B별 `bootstrap.servers` 맵과 인증 설정 |
 | 이벤트 토픽 | 양쪽에 같은 이름으로 만든 새 SDK 전용 토픽, 파티션 2개, 복제 계수 1, offset 0부터 이력 보존 |
 | 보존 설정 | `cleanup.policy=delete`, `retention.ms=-1`, `retention.bytes=-1` |
+| 이벤트 크기 | `maxEventBytes` 기본값은 UTF-8 이벤트 ID, UTF-8 key, payload를 합해 900,000바이트다. 발행·복제·소비·복구에 같은 값을 사용한다. |
 
-SDK 헤더가 없는 레코드가 있으면 그 레코드를 읽는 쪽의 복제가 멈출 수 있다. 이벤트·내부 토픽, 소비 그룹 offset, transactional ID에 접근할 권한이 필요하다. [Compose 설정](infra/compose.yaml)
+SDK 헤더가 없거나 복제 크기 한도를 초과한 레코드가 있으면 그 레코드를 읽는 쪽의 복제가 멈출 수 있다. 이벤트·내부 토픽, 소비 그룹 offset, transactional ID에 접근할 권한이 필요하다. [Compose 설정](infra/compose.yaml)
 
 ### 발행 예제
 
@@ -188,6 +189,8 @@ docker compose -f infra/compose.yaml down
 `RepairService.runOnce()`는 캡처한 로그 범위의 누락 사본을 보충한다. [RepairService](src/main/java/io/github/keemgdeok/kafkaactiveactive/repair/RepairService.java)
 
 수동 전환 시 기존 Consumer를 모두 종료하고 중지 상태를 유지한다. 양쪽 Kafka에 접근할 수 있을 때 `GroupTransition.prepare()`로 데이터와 완료 이력을 복구한 뒤 `startTarget()`을 호출한다. Offset은 각 Kafka에서 따로 관리한다. 전환 대상은 복구한 완료 이력으로 이미 처리한 이벤트를 건너뛴다. [전환 예제](src/main/java/io/github/keemgdeok/kafkaactiveactive/demo/DemoMain.java)
+
+전환 준비 중 데이터 복구는 양쪽 이벤트 로그를 offset 0부터 캡처한 경계까지 스캔한다. 제한 시간은 5분이며, 인덱스 한도는 고유 이벤트 ID 100만 개와 추정 크기 256 MiB 중 먼저 도달하는 값이다. 데이터 복구가 한도를 넘으면 준비가 실패하고 대상 Consumer는 시작되지 않는다. [복구 기본값](src/main/java/io/github/keemgdeok/kafkaactiveactive/repair/RepairConfig.java)
 
 [발행 설정](src/main/java/io/github/keemgdeok/kafkaactiveactive/publish/PublishConfig.java) · [소비 설정](src/main/java/io/github/keemgdeok/kafkaactiveactive/consume/ConsumerSettings.java) · [CI](.github/workflows/ci.yml) · [빌드 작업](build.gradle.kts)
 
