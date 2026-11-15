@@ -52,8 +52,9 @@ Pass the serialized payload as `byte[]`, handle the [publish result](#delivery-g
 | Connections | Separate `bootstrap.servers` maps and authentication settings for A and B |
 | Event topic | New SDK-only topic with the same name on both sides, 2 partitions, replication factor 1, history retained from offset 0 |
 | Retention | `cleanup.policy=delete`, `retention.ms=-1`, `retention.bytes=-1` |
+| Event size | Default `maxEventBytes` is 900,000 bytes for the UTF-8 event ID, UTF-8 key, and payload combined. Use the same value for the publisher, replication, consumer, and repair. |
 
-A record without SDK headers can stop replication from its source broker. The SDK requires access to event and internal topics, group offsets, and transactional IDs. [Compose configuration](infra/compose.yaml)
+A record without SDK headers or larger than the replication size limit can stop replication from its source broker. The SDK requires access to event and internal topics, group offsets, and transactional IDs. [Compose configuration](infra/compose.yaml)
 
 ### Producer example
 
@@ -188,6 +189,8 @@ Consumer commits are per partition. `CONFIRMED` verifies newly completed IDs on 
 `RepairService.runOnce()` fills missing copies within a captured log boundary. [RepairService](src/main/java/io/github/keemgdeok/kafkaactiveactive/repair/RepairService.java)
 
 For a manual switch, stop all source consumers and keep them stopped. With both Kafka deployments reachable, use `GroupTransition.prepare()` to recover data and completion history, then call `startTarget()`. Each Kafka keeps its own offsets. The target uses the recovered completion history to skip completed events. [Transition example](src/main/java/io/github/keemgdeok/kafkaactiveactive/demo/DemoMain.java)
+
+During preparation, data repair scans both event logs from offset 0 up to the captured boundaries. It has a 5-minute deadline and an index limit of 1,000,000 unique event IDs or an estimated 256 MiB, whichever is reached first. If data repair exceeds a limit, preparation fails before the target consumer starts. [Repair defaults](src/main/java/io/github/keemgdeok/kafkaactiveactive/repair/RepairConfig.java)
 
 [Publisher settings](src/main/java/io/github/keemgdeok/kafkaactiveactive/publish/PublishConfig.java) · [Consumer settings](src/main/java/io/github/keemgdeok/kafkaactiveactive/consume/ConsumerSettings.java) · [CI](.github/workflows/ci.yml) · [Build tasks](build.gradle.kts)
 
