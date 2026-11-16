@@ -9,6 +9,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
+import io.github.keemgdeok.kafkaactiveactive.internal.KafkaAccess;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.ListOffsetsOptions;
 import org.apache.kafka.clients.admin.OffsetSpec;
@@ -49,8 +51,8 @@ final class KafkaRepairLog implements RepairLog {
             consumerProperties.put("isolation.level", "read_committed");
             consumerProperties.put("allow.auto.create.topics", false);
             consumerProperties.put("max.poll.records", 100);
-            consumerProperties.put("fetch.max.bytes", 16 * 1024 * 1024);
-            consumerProperties.put("max.partition.fetch.bytes", config.maxEventBytes() + 1_024);
+            consumerProperties.put("fetch.max.bytes", KafkaAccess.FETCH_MAX_BYTES);
+            consumerProperties.put("max.partition.fetch.bytes", config.maxEventBytes() + EventConstraints.RECORD_OVERHEAD_BYTES);
             consumerProperties.put("default.api.timeout.ms", 5_000);
             reader = new KafkaConsumer<>(consumerProperties);
             consumer = reader;
@@ -65,8 +67,8 @@ final class KafkaRepairLog implements RepairLog {
             producerProperties.put("max.block.ms", Math.min(1_000L, config.runTimeout().toMillis()));
             producerProperties.put("request.timeout.ms", 1_000);
             producerProperties.put("delivery.timeout.ms", 5_000);
-            producerProperties.put("buffer.memory", 32L * 1024 * 1024);
-            producerProperties.put("max.request.size", config.maxEventBytes() + 1_024);
+            producerProperties.put("buffer.memory", KafkaAccess.PRODUCER_BUFFER_BYTES);
+            producerProperties.put("max.request.size", config.maxEventBytes() + EventConstraints.RECORD_OVERHEAD_BYTES);
             producer = new KafkaProducer<>(producerProperties);
             partitions = List.of(new TopicPartition(config.topic(), 0), new TopicPartition(config.topic(), 1));
         } catch (RuntimeException failure) {
@@ -82,7 +84,7 @@ final class KafkaRepairLog implements RepairLog {
     public RepairReport.LogBoundary capture() {
         deadline.remaining();
         var topic = await(admin.describeTopics(List.of(config.topic())).allTopicNames()).get(config.topic());
-        if (topic.topicId().equals(Uuid.ZERO_UUID) || topic.partitions().size() != 2
+        if (topic.topicId().equals(Uuid.ZERO_UUID) || topic.partitions().size() != EventConstraints.PARTITION_COUNT
                 || topic.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
             throw new RepairException(RepairException.Reason.INVALID_TOPOLOGY, "expected topic ID and two RF=1 partitions");
         }

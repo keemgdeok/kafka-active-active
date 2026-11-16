@@ -7,9 +7,9 @@ import java.util.Objects;
 import java.util.UUID;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
 import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
 
-/** Target append ACK evidence. Source log observation is not a source Produce ACK. */
 public record ReplicationAck(UUID attempt, String eventId, byte[] hash, int partition,
                              LogIdentity source, long sourceOffset, LogIdentity target, long targetOffset) {
     public ReplicationAck {
@@ -19,7 +19,7 @@ public record ReplicationAck(UUID attempt, String eventId, byte[] hash, int part
         Objects.requireNonNull(target, "target");
         hash = hash.clone();
         if (eventId.isBlank() || !StandardCharsets.UTF_8.newEncoder().canEncode(eventId)
-                || hash.length != 32 || partition < 0 || partition > 1
+                || hash.length != 32 || partition < 0 || partition >= EventConstraints.PARTITION_COUNT
                 || sourceOffset < 0 || targetOffset < 0 || source.clusterId().equals(target.clusterId())) {
             throw new IllegalArgumentException("invalid replication ACK evidence");
         }
@@ -40,7 +40,7 @@ public record ReplicationAck(UUID attempt, String eventId, byte[] hash, int part
     }
     public static ReplicationAck decode(ConsumerRecord<byte[], byte[]> record, int maxEventBytes) {
         if (record.key() == null || record.key().length != 16 || record.value() == null
-                || record.value().length > (long) maxEventBytes + 1_024) {
+                || record.value().length > (long) maxEventBytes + EventConstraints.RECORD_OVERHEAD_BYTES) {
             throw new IllegalArgumentException("invalid ACK record size or key");
         }
         try {

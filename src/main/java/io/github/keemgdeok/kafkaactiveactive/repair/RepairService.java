@@ -12,10 +12,6 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 
-/**
- * One repair owner per topic. Each run rebuilds its index from Kafka; no offsets or IDs are persisted.
- * Normal publishing can continue, but concurrent repair owners are not coordinated across processes.
- */
 public final class RepairService implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(RepairService.class.getName());
     private final RepairConfig config;
@@ -51,7 +47,6 @@ public final class RepairService implements AutoCloseable {
         scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
-    /** Optional periodic execution; failures remain visible in status and the next run starts fresh. */
     public synchronized void start() {
         requireOpen();
         if (!started) {
@@ -60,7 +55,6 @@ public final class RepairService implements AutoCloseable {
                 try {
                     runOnce();
                 } catch (RepairException expected) {
-                    // runOnce records failures; BUSY means a manual run already owns the service.
                 }
             }, 0, config.interval().toNanos(), TimeUnit.NANOSECONDS);
         }
@@ -97,7 +91,6 @@ public final class RepairService implements AutoCloseable {
                 scan(a, initialA, Map.of(0, 0L, 1, 0L), index, 0, deadline);
                 scan(b, initialB, Map.of(0, 0L, 1, 0L), index, 1, deadline);
 
-                // One finite tail refresh reduces races with delayed peer appends without chasing a moving tail.
                 var boundaryA = a.capture();
                 var boundaryB = b.capture();
                 initialA.requireContinuation(boundaryA);
@@ -108,9 +101,8 @@ public final class RepairService implements AutoCloseable {
                 a.verify(boundaryA);
                 b.verify(boundaryB);
 
-                // Validate the whole bounded union before copying, including ID/key/payload conflicts.
-                copy(a, b, boundaryA, index, 0, copied, deadline);
-                copy(b, a, boundaryB, index, 1, copied, deadline);
+                copyMissingRecords(a, b, boundaryA, index, 0, copied, deadline);
+                copyMissingRecords(b, a, boundaryB, index, 1, copied, deadline);
                 index.requireFullyCopied();
                 a.verify(boundaryA);
                 b.verify(boundaryB);
@@ -157,7 +149,7 @@ public final class RepairService implements AutoCloseable {
         log.verify(boundary);
     }
 
-    private static void copy(RepairLog source, RepairLog target, RepairReport.LogBoundary boundary,
+    private static void copyMissingRecords(RepairLog source, RepairLog target, RepairReport.LogBoundary boundary,
                              RepairIndex index, int side, long[] copied, RepairLog.Deadline deadline) {
         source.scan(boundary, Map.of(0, 0L, 1, 0L), record -> {
             deadline.remaining();
@@ -190,7 +182,6 @@ public final class RepairService implements AutoCloseable {
         }
     }
 
-    /** lastCompleted is historical boundary evidence; inspect lastFailure before treating the service as healthy. */
     public record Status(boolean running, RepairReport lastCompleted, Failure lastFailure) {}
     public record Failure(String runId, RepairException.Reason reason, String message, Instant occurredAt,
                           long copiedToA, long copiedToB) {}

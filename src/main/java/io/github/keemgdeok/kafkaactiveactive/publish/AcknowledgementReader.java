@@ -10,7 +10,6 @@ import io.github.keemgdeok.kafkaactiveactive.internal.KafkaAccess;
 import io.github.keemgdeok.kafkaactiveactive.replication.LogIdentity;
 import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationConfig;
 
-/** A bounded streaming reader, not an index of receipt history. Only live UUIDs are decoded. */
 final class AcknowledgementReader {
     record Generation(LogIdentity source, LogIdentity target) {}
     private final RoutedKafkaPublisher owner;
@@ -53,8 +52,6 @@ final class AcknowledgementReader {
                 var partitions = List.of(new TopicPartition(config.confirmationTopic(), 0),
                         new TopicPartition(config.confirmationTopic(), 1));
                 reader.assign(partitions);
-                // Also on reconnect: never seek past receipts for RAWs sent while this reader was absent.
-                // Retention bounds the log; memory holds only one poll plus live publisher attempts.
                 var starts = reader.beginningOffsets(partitions, config.operationTimeout());
                 starts.forEach(reader::seek);
                 owner.observe(side, generation);
@@ -91,7 +88,7 @@ final class AcknowledgementReader {
         long end = KafkaAccess.deadline(config.operationTimeout());
         var sourceId = sourceAccess.identity(config.topic(), end, true);
         var targetId = targetAccess.identity(config.topic(), end, true);
-        config.groupId(sourceId, targetId); // Native cluster aliases cannot form an independent pair.
+        config.groupId(sourceId, targetId);
         return new Generation(sourceId, targetId);
     }
 }

@@ -38,10 +38,8 @@ Add the SDK source to your Gradle build. Adjust the checkout path as needed.
 `a` and `b` hold the Kafka connection settings. `topic` is the shared topic name.
 
 ```java
-// Reuse the publisher until shutdown.
 var publisher = RoutedKafkaPublisher.open(PublishConfig.defaults(topic), a, b);
 
-// For each event.
 var resultStage = publisher.send(new Event(eventId, key, payloadBytes));
 ```
 
@@ -65,13 +63,11 @@ docker compose -f infra/compose.yaml up -d --wait kafka-a kafka-b
 docker compose -f infra/compose.yaml run --rm init-topics
 ```
 
-Run the two commands in separate terminals.
+Run the two commands in separate terminals. The first process owns replication.
 
 ```bash
-# Terminal 1: publisher and replication owner
 KAA_REPLICATION_ENABLED=true ./gradlew --no-daemon runProducerExample
 
-# Terminal 2: publisher only (the default role)
 KAA_REPLICATION_ENABLED=false ./gradlew --no-daemon runProducerExample
 ```
 
@@ -161,7 +157,7 @@ Run from the repository root.
 ./gradlew --no-daemon -p ../sdk-example run
 ```
 
-On a fresh topic, the first run prints `order-001`. The next run filters that ID. Create, poll, commit, and close each consumer on the same thread.
+On a fresh topic, the first run prints `order-001`. The next run filters that ID. Create, poll, commit, and close each consumer on the same thread. `commit()` does its Kafka I/O on that thread and returns a completed stage.
 
 </details>
 

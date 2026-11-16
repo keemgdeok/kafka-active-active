@@ -40,7 +40,6 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.Test;
 
-/** Correctness comparison, not a throughput/p99 benchmark or an external-sink exactly-once claim. */
 @SuppressWarnings("try")
 class MirrorMakerComparisonTest {
     @Test void sameInputsSurviveOutageAndMm2TranslatesAnInactiveGroupsOriginOffsets() throws Exception {
@@ -113,7 +112,6 @@ class MirrorMakerComparisonTest {
             awaitMirrors(environment, topic, events.subList(0, warm));
             environment.pauseA();
             try {
-                // This fallback is explicit application routing, not a feature supplied by MM2.
                 for (var event : events.subList(warm, warm + 4)) { origin(event, b, topic, "B-fallback", evidence); }
             } finally { resumed = System.nanoTime(); environment.resumeA(); }
             routeOriginals(events.subList(warm + 4, events.size()), a, b, topic, originsA, evidence);
@@ -166,7 +164,7 @@ class MirrorMakerComparisonTest {
             }
             assertEquals(Set.copyOf(expected), seen);
             consumer.commitSync(Duration.ofSeconds(5));
-        } // Native source group is inactive before MM2 syncs its translated offsets into B.
+        }
         long deadline = System.nanoTime() + Duration.ofMinutes(2).toNanos();
         try (var target = Admin.create(environment.bProperties())) {
             while (System.nanoTime() < deadline) {

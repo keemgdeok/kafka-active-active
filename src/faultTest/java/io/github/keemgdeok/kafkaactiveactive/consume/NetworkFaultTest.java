@@ -17,6 +17,8 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.stream.IntStream;
 
 import eu.rekawek.toxiproxy.model.ToxicDirection;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
+import io.github.keemgdeok.kafkaactiveactive.internal.KafkaAccess;
 import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
 import io.github.keemgdeok.kafkaactiveactive.support.ReplicationFixture;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
@@ -30,8 +32,10 @@ import io.github.keemgdeok.kafkaactiveactive.verification.EventAudit;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventDataset;
 import io.github.keemgdeok.kafkaactiveactive.verification.JsonlEvidence;
 
+import org.apache.kafka.clients.producer.KafkaProducer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -41,6 +45,57 @@ class NetworkFaultTest {
     @BeforeAll static void start() throws Exception { KAFKA.start(); }
     @AfterAll static void stop() throws Exception { KAFKA.close(); }
     static IntStream seeds() { return FaultSeeds.values(); }
+
+    @Test void slowPeerUsesOneMirroringDeadlineAndKeepsLocalCompletions() throws Exception {
+        String topic = "slow-peer-" + UUID.randomUUID();
+        KAFKA.createTopic(topic);
+        var settings = settings(topic);
+        var events = EventDataset.generate(20, 0, true);
+        var writerConfig = KafkaAccess.writer(KAFKA.aDirect(), settings.operationTimeout(), settings.maxEventBytes());
+        writerConfig.put("transactional.id", topic);
+        writerConfig.put("linger.ms", 100);
+        try (var writer = new KafkaProducer<byte[], byte[]>(writerConfig);
+             var consumer = new ActiveKafkaConsumer(settings, KAFKA.aDirect(), KAFKA.bProxied())) {
+            writer.initTransactions();
+            writer.beginTransaction();
+            writer.send(EventCodec.raw(topic, events.getFirst(), UUID.randomUUID())).get(5, TimeUnit.SECONDS);
+            writer.commitTransaction();
+            assertEquals(CommitResult.Status.CONFIRMED,
+                    consumer.commit(awaitBatch(consumer).processed()).toCompletableFuture().join().status());
+            writer.beginTransaction();
+            for (var event : events.subList(1, events.size())) {
+                writer.send(EventCodec.raw(topic, event, UUID.randomUUID()));
+            }
+            writer.commitTransaction();
+            var batch = awaitBatch(consumer);
+            assertEquals(events.size() - 1, batch.records().size());
+            var delay = KAFKA.proxyB.toxics().latency("slow-completion-acks", ToxicDirection.DOWNSTREAM, 250);
+            try {
+                var result = consumer.commit(batch.processed()).toCompletableFuture();
+                assertTrue(result.isDone());
+                var commit = result.join();
+                assertEquals(CommitResult.Status.LOCAL_ONLY, commit.status());
+                assertEquals(batch.records().size(), commit.locallyCompletedIds().size());
+                assertTrue(commit.peerConfirmedIds().size() < commit.locallyCompletedIds().size());
+                assertTrue(commit.locallyCompletedIds().containsAll(commit.peerConfirmedIds()));
+            } finally {
+                delay.remove();
+            }
+        }
+        var repair = new CompletionReplicator(settings, KAFKA.aDirect(), KAFKA.bDirect()).runOnce();
+        assertEquals(events.size(), repair.completedIds());
+        assertTrue(repair.copiedToB() > 0);
+    }
+
+    private static Batch awaitBatch(ActiveKafkaConsumer consumer) {
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        while (System.nanoTime() - deadline < 0) {
+            var batch = consumer.poll(Duration.ofMillis(200));
+            if (!batch.isEmpty()) { return batch; }
+        }
+        throw new AssertionError("no delivery: " + consumer.status());
+    }
+
     @ParameterizedTest(name = "seed={0} lost ACK, asymmetric cut, hot key and live repair") @MethodSource("seeds")
     void responseLossAndAsymmetricIsolationDoNotInventSuccessOrLoseAcknowledgedEvents(int seed) throws Exception {
         String topic = "network-" + UUID.randomUUID();
@@ -59,7 +114,6 @@ class NetworkFaultTest {
                 KAFKA.proxyB.toxics().timeout("lose-b-responses", ToxicDirection.DOWNSTREAM, 0);
                 var lost = send(publisher, events.get(2), outcomes, evidence);
                 assertEquals(PublishResult.Status.ACCEPTED_DEGRADED, lost.status());
-                // The hot key routes to B.P1. B stored the RAW although its ACK was lost; A ACKed fallback.
                 EventAudit.read(KAFKA.bDirect(), List.of(topic), events.subList(0, 3)).requireComplete();
                 KAFKA.proxyA.toxics().timeout("lose-a-responses", ToxicDirection.DOWNSTREAM, 0);
                 var unknown = send(publisher, events.get(3), outcomes, evidence);
@@ -68,13 +122,11 @@ class NetworkFaultTest {
                         "UNKNOWN is not rejection: fallback A stored this input without a visible ACK");
                 KAFKA.heal();
                 awaitDrained(publisher);
-                // Healing the proxy does not instantly refresh an existing producer's metadata.
-                // A healthy B ACK is valid success; the final real-log audit proves restoration.
                 assertTrue(send(publisher, events.get(3), outcomes, evidence).successful());
                 assertEquals(PublishResult.Status.UNKNOWN, unknown.status(), "late ACK must not rewrite returned evidence");
                 assertEquals(PublishResult.Status.ACCEPTED_DEGRADED, lost.status());
 
-                KAFKA.proxyA.disable(); // A is alive and direct observers remain connected.
+                KAFKA.proxyA.disable();
                 for (int i = 4; i < 6; i++) {
                     assertEquals(PublishResult.Status.ACCEPTED_DEGRADED, send(publisher, events.get(i), outcomes, evidence).status());
                 }
@@ -110,7 +162,6 @@ class NetworkFaultTest {
                     assertEquals(PublishResult.Delivery.ACKNOWLEDGED, result.clusterB().delivery());
                 }
             }
-            // Delay completion replication separately from input durability. One active native group remains on B.
             var settings = settings(topic);
             KAFKA.proxyA.disable();
             int calls = 0;
@@ -137,7 +188,7 @@ class NetworkFaultTest {
             KAFKA.heal();
             var transition = new GroupTransition(settings, KAFKA.bDirect(), KAFKA.aDirect(), () -> true).prepare();
             assertEquals(events.size(), transition.completionReport().completedIds());
-            assertEquals(events.size(), transition.completionReport().copiedToB()); // source B -> target A
+            assertEquals(events.size(), transition.completionReport().copiedToB());
             try (var target = transition.startTarget()) {
                 long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
                 while (target.status().filteredRecords() < a.physicalRecords() && System.nanoTime() < deadline) {
@@ -167,7 +218,7 @@ class NetworkFaultTest {
         try(var evidence=new JsonlEvidence(Path.of("build/reports/faultTest","reader-"+seed+".jsonl"));
             var publisher=ReplicationFixture.ready(RoutedKafkaPublisher.open(config,KAFKA.aProxied(),KAFKA.bDirect()))) {
             assertEquals(PublishResult.Status.CONFIRMED,publisher.send(warm).toCompletableFuture().get(8,TimeUnit.SECONDS).status());
-            KAFKA.proxyA.disable(); // Only publisher paths. The explicit worker still uses direct addresses.
+            KAFKA.proxyA.disable();
             var isolated=publisher.send(event).toCompletableFuture().get(8,TimeUnit.SECONDS);
             assertEquals(PublishResult.Status.ACCEPTED_DEGRADED,isolated.status());
             long end=System.nanoTime()+Duration.ofSeconds(15).toNanos();

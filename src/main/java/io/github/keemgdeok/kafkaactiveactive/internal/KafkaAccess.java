@@ -18,8 +18,10 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import io.github.keemgdeok.kafkaactiveactive.replication.LogIdentity;
 import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationConfig;
 
-/** Native protocol helpers shared by replication and its acknowledgement readers. */
 public final class KafkaAccess implements AutoCloseable {
+    public static final int FETCH_MAX_BYTES = 16 * 1024 * 1024;
+    public static final long PRODUCER_BUFFER_BYTES = 32L * 1024 * 1024;
+
     private final Admin admin;
     public KafkaAccess(Map<String, Object> properties, Duration timeout) {
         var values = new HashMap<>(properties);
@@ -34,7 +36,7 @@ public final class KafkaAccess implements AutoCloseable {
                 .anyMatch(p -> p.leader() == null || p.leader().id() < 0)) {
             throw new org.apache.kafka.common.errors.TimeoutException("topic identity/leader not ready");
         }
-        if (value.partitions().size() != 2
+        if (value.partitions().size() != EventConstraints.PARTITION_COUNT
                 || value.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
             throw new IllegalArgumentException("expected native topic ID and two RF1 partitions");
         }
@@ -53,9 +55,9 @@ public final class KafkaAccess implements AutoCloseable {
     public void confirmationTopic(ReplicationConfig config, long deadline) {
         var values = Map.of("cleanup.policy", "delete", "retention.ms", "3600000", "retention.bytes", "-1");
         try {
-            await(admin.createTopics(List.of(new NewTopic(config.confirmationTopic(), 2, (short) 1)
+            await(admin.createTopics(List.of(new NewTopic(config.confirmationTopic(), EventConstraints.PARTITION_COUNT, (short) 1)
                     .configs(values))).all(), deadline);
-        } catch (TopicExistsException exists) { /* Validate, never silently rewrite another configuration. */ }
+        } catch (TopicExistsException exists) { }
         identity(config.confirmationTopic(), deadline, false);
         requireConfig(config.confirmationTopic(), values, deadline);
     }
@@ -95,13 +97,11 @@ public final class KafkaAccess implements AutoCloseable {
         config.put("isolation.level", "read_committed");
         config.put("allow.auto.create.topics", false);
         config.put("max.poll.records", batch);
-        // A crashed/unreachable member must not delay each reconnect by the native 45s default.
-        // Match the SDK application consumer defaults; callers can tune their broker's session bounds.
         config.putIfAbsent("session.timeout.ms", 6_000);
         config.putIfAbsent("heartbeat.interval.ms", 500);
         config.putIfAbsent("max.poll.interval.ms", 120_000);
-        config.put("fetch.max.bytes", 16 * 1024 * 1024);
-        config.put("max.partition.fetch.bytes", maxEventBytes + 1_024);
+        config.put("fetch.max.bytes", FETCH_MAX_BYTES);
+        config.put("max.partition.fetch.bytes", maxEventBytes + EventConstraints.RECORD_OVERHEAD_BYTES);
         config.put("default.api.timeout.ms", (int) timeout.toMillis());
         config.put("request.timeout.ms", (int) timeout.toMillis());
         return config;
@@ -120,8 +120,8 @@ public final class KafkaAccess implements AutoCloseable {
         config.put("request.timeout.ms", 1_000);
         config.put("delivery.timeout.ms", (int) Math.max(1_000, timeout.toMillis()));
         config.put("max.block.ms", timeout.toMillis());
-        config.put("buffer.memory", 32L * 1024 * 1024);
-        config.put("max.request.size", maxEventBytes + 1_024);
+        config.put("buffer.memory", PRODUCER_BUFFER_BYTES);
+        config.put("max.request.size", maxEventBytes + EventConstraints.RECORD_OVERHEAD_BYTES);
         return config;
     }
     @Override public void close() { admin.close(Duration.ZERO); }

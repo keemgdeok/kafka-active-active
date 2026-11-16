@@ -14,7 +14,6 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.toxiproxy.ToxiproxyContainer;
 import org.testcontainers.kafka.KafkaContainer;
 
-/** Proxies both bootstrap and advertised addresses, so Kafka metadata cannot bypass the fault. */
 public final class ProxyKafkaPair implements AutoCloseable {
     private final Network network = Network.newNetwork();
     private final ToxiproxyContainer proxy = new ToxiproxyContainer(

@@ -2,7 +2,6 @@ package io.github.keemgdeok.kafkaactiveactive.publish;
 
 import java.util.Objects;
 
-/** Immutable evidence at response time, not a claim about subsequent repair or late ACKs. */
 public record PublishResult(String eventId, int partition, Status status,
                             BrokerResult clusterA, BrokerResult clusterB, String reason) {
     public enum Status { CONFIRMED, ACCEPTED_DEGRADED, UNKNOWN, REJECTED }

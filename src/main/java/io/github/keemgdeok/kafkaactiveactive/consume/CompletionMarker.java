@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -30,7 +31,8 @@ record CompletionMarker(String id, int partition, byte[] hash) {
         byte[] hash = new byte[32];
         buffer.get(hash);
         String id = EventCodec.utf8(record.key());
-        if (id.isBlank() || partition != record.partition() || partition < 0 || partition > 1) {
+        if (id.isBlank() || partition != record.partition() || partition < 0
+                || partition >= EventConstraints.PARTITION_COUNT) {
             throw new IllegalStateException("invalid completion identity/partition");
         }
         return new CompletionMarker(id, partition, hash);

@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -24,7 +25,11 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
+import io.github.keemgdeok.kafkaactiveactive.internal.KafkaAccess;
 import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
+import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationAck;
+import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationConfig;
 
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
@@ -32,11 +37,6 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 
-/**
- * Routes RAW to A.P0 or B.P1 and falls back once when the preferred RAW ACK is absent.
- * ReplicationService must be started explicitly to create the peer copy and its ACK evidence.
- * Timeout is not cancellation. Use asynchronous continuations for blocking application work.
- */
 public final class RoutedKafkaPublisher implements AutoCloseable {
     public static final String EVENT_ID_HEADER = EventCodec.EVENT_ID_HEADER;
     public static final String FORMAT_HEADER = EventCodec.FORMAT_HEADER;
@@ -48,7 +48,7 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
     private final Set<Request> active = ConcurrentHashMap.newKeySet();
     private final Semaphore permits;
     private final LongSupplier clock;
-    private final Map<java.util.UUID, Request> awaiting = new ConcurrentHashMap<>();
+    private final Map<UUID, Request> requestsByAttemptId = new ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.AtomicReferenceArray<AcknowledgementReader.Generation> generations =
             new java.util.concurrent.atomic.AtomicReferenceArray<>(2);
     private final java.util.concurrent.atomic.AtomicLong invalidReceipts = new java.util.concurrent.atomic.AtomicLong();
@@ -68,35 +68,54 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
                  AcknowledgementReader.Generation generation) {
         if (record.key() == null || record.key().length != 16) { return; }
         var key = java.nio.ByteBuffer.wrap(record.key());
-        var request = awaiting.get(new java.util.UUID(key.getLong(), key.getLong()));
+        var request = requestsByAttemptId.get(new UUID(key.getLong(), key.getLong()));
         if (request == null) { return; }
         try {
-            request.receipt(side, io.github.keemgdeok.kafkaactiveactive.replication.ReplicationAck.decode(
-                    record, config.maxEventBytes()), generation);
+            request.receipt(side, ReplicationAck.decode(record, config.maxEventBytes()), generation);
         } catch (IllegalArgumentException invalid) { invalidReceipts.incrementAndGet(); }
     }
 
-    /** Native authentication/network properties are supplied separately for each cluster. */
     public static RoutedKafkaPublisher open(PublishConfig config, Map<String, Object> clusterA,
                                           Map<String, Object> clusterB) {
         Objects.requireNonNull(config, "config");
-        Map<String, Object> a = producerProperties(config, clusterA);
-        Map<String, Object> b = producerProperties(config, clusterB);
+        var sourceA = Map.copyOf(clusterA);
+        var sourceB = Map.copyOf(clusterB);
+        var a = producerProperties(config, sourceA);
+        var b = producerProperties(config, sourceB);
         if (Objects.equals(a.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG),
                 b.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG))) {
             throw new IllegalArgumentException("A and B must have independent bootstrap configurations");
         }
         Producer<byte[], byte[]> producerA = new KafkaProducer<>(a);
+        Producer<byte[], byte[]> producerB = null;
+        RoutedKafkaPublisher publisher = null;
         try {
-            var publisher = new RoutedKafkaPublisher(config, producerA, new KafkaProducer<>(b), System::nanoTime);
-            var replication = io.github.keemgdeok.kafkaactiveactive.replication.ReplicationConfig.defaults(config.topic());
-            publisher.readers = List.of(new AcknowledgementReader(publisher, 0, clusterA, clusterB, replication),
-                    new AcknowledgementReader(publisher, 1, clusterB, clusterA, replication));
+            producerB = new KafkaProducer<>(b);
+            publisher = new RoutedKafkaPublisher(config, producerA, producerB, System::nanoTime);
+            var replication = ReplicationConfig.defaults(config.topic());
+            publisher.readers = List.of(new AcknowledgementReader(publisher, 0, sourceA, sourceB, replication),
+                    new AcknowledgementReader(publisher, 1, sourceB, sourceA, replication));
             publisher.readers.forEach(AcknowledgementReader::start);
             return publisher;
         } catch (RuntimeException failure) {
-            producerA.close(Duration.ZERO);
+            if (publisher != null) {
+                closeAfterFailedOpen(publisher::close, failure);
+            } else {
+                if (producerB != null) {
+                    var opened = producerB;
+                    closeAfterFailedOpen(() -> opened.close(Duration.ZERO), failure);
+                }
+                closeAfterFailedOpen(() -> producerA.close(Duration.ZERO), failure);
+            }
             throw failure;
+        }
+    }
+
+    private static void closeAfterFailedOpen(Runnable close, RuntimeException failure) {
+        try {
+            close.run();
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
         }
     }
 
@@ -122,7 +141,6 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
         if (!properties.containsKey(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG)) {
             throw new IllegalArgumentException("bootstrap.servers is required for each cluster");
         }
-        // These properties are SDK contracts and cannot be weakened by native configuration.
         properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
         properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
         properties.put(ProducerConfig.ACKS_CONFIG, "all");
@@ -134,8 +152,8 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
         properties.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG,
                 (int) Math.max(1_000, config.timeout().toMillis()));
         properties.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, Math.min(1_000L, config.timeout().toMillis()));
-        properties.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 32L * 1024 * 1024);
-        properties.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, config.maxEventBytes() + 1_024);
+        properties.put(ProducerConfig.BUFFER_MEMORY_CONFIG, KafkaAccess.PRODUCER_BUFFER_BYTES);
+        properties.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, config.maxEventBytes() + EventConstraints.RECORD_OVERHEAD_BYTES);
         if (properties.containsKey(ProducerConfig.TRANSACTIONAL_ID_CONFIG)
                 || properties.containsKey(ProducerConfig.INTERCEPTOR_CLASSES_CONFIG)
                 || properties.containsKey("partitioner.class")) {
@@ -144,10 +162,6 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
         return properties;
     }
 
-    /**
-     * Returns by the configured deadline under normal JVM scheduling. Admission is nonblocking.
-     * A timeout is not cancellation: a started native write can still ACK or be stored later.
-     */
     public synchronized CompletionStage<PublishResult> send(Event event) {
         Objects.requireNonNull(event, "event");
         if (closed) {
@@ -159,12 +173,12 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
         if (!permits.tryAcquire()) {
             return rejected(event, "pending request limit reached");
         }
-        Request request = new Request(event, clock.getAsLong() + config.timeout().toNanos());
+        Request request = new Request(event);
         active.add(request);
         request.deadlineTask = timer.schedule(request::expire, config.timeout().toNanos(), TimeUnit.NANOSECONDS);
         request.fallbackTask = timer.schedule(request::fallbackIfNeeded,
                 config.preferredAckTimeout().toNanos(), TimeUnit.NANOSECONDS);
-        request.schedule(event.partition());
+        request.schedule(request.partition);
         return request.response.minimalCompletionStage();
     }
 
@@ -180,7 +194,7 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
                 return;
             }
             var partitions = producers.get(side).partitionsFor(config.topic());
-            if (partitions.size() != 2 || partitions.stream().anyMatch(p -> p.replicas().length != 1)) {
+            if (partitions.size() != EventConstraints.PARTITION_COUNT || partitions.stream().anyMatch(p -> p.replicas().length != 1)) {
                 throw new IllegalStateException("business topic must have two RF=1 partitions");
             }
             if (!request.canDispatch()) {
@@ -189,14 +203,13 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
             }
             Event event = request.event;
             request.captureGeneration(side);
-            var record = EventCodec.raw(config.topic(), event, request.attempts[side]);
+            var record = EventCodec.raw(config.topic(), event, request.attempts[side].id);
             producers.get(side).send(record, (metadata, error) -> request.finished(side, metadata, error));
         } catch (RuntimeException failure) {
             request.finished(side, null, failure);
         }
     }
 
-    // Also used by deterministic clock-driven tests; production schedules each request independently.
     void expirePending() {
         active.forEach(request -> { request.fallbackIfNeeded(); request.expire(); });
     }
@@ -217,12 +230,10 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
             dispatchers.forEach(ThreadPoolExecutor::shutdown);
         }
         readers.forEach(AcknowledgementReader::stop);
-        // Native clients are closed concurrently so a failed broker cannot consume both budgets.
         List<Thread> closers = producers.stream().map(producer -> Thread.ofPlatform().daemon().start(() -> {
             try {
                 producer.close(Duration.ofNanos(Math.max(0, deadline - System.nanoTime())));
             } catch (RuntimeException ignored) {
-                // Pending requests remain conservatively UNKNOWN/DEGRADED, never REJECTED.
             }
         })).toList();
         boolean interrupted = false;
@@ -249,143 +260,160 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
         }
     }
 
+    private static final class Attempt {
+        private final UUID id = UUID.randomUUID();
+        private PublishResult.BrokerResult outcome = PublishResult.BrokerResult.unconfirmed();
+        private AcknowledgementReader.Generation generation;
+        private ReplicationAck earlyReceipt;
+        private Long rawOffset;
+        private boolean scheduled;
+        private boolean sendFinished;
+
+        private boolean settled() { return !scheduled || sendFinished; }
+    }
+
     private final class Request {
         private final Event event;
+        private final int partition;
         private final long deadline;
         private final long fallbackAt;
         private final CompletableFuture<PublishResult> response = new CompletableFuture<>();
-        private final PublishResult.BrokerResult[] outcomes = {
-            PublishResult.BrokerResult.unconfirmed(), PublishResult.BrokerResult.unconfirmed()};
-        private final java.util.UUID[] attempts = {java.util.UUID.randomUUID(), java.util.UUID.randomUUID()};
-        private final boolean[] scheduled = new boolean[2];
-        private final boolean[] done = new boolean[2];
-        private final Long[] rawOffsets = new Long[2];
-        private final AcknowledgementReader.Generation[] sentGeneration = new AcknowledgementReader.Generation[2];
-        private final io.github.keemgdeok.kafkaactiveactive.replication.ReplicationAck[] early =
-                new io.github.keemgdeok.kafkaactiveactive.replication.ReplicationAck[2];
+        private final Attempt[] attempts = {new Attempt(), new Attempt()};
         private ScheduledFuture<?> deadlineTask;
         private ScheduledFuture<?> fallbackTask;
-        private PublishResult snapshot;
+        private PublishResult responseSnapshot;
         private boolean released;
 
-        private Request(Event event, long deadline) {
-            this.event = event; this.deadline = deadline;
-            fallbackAt = deadline - config.timeout().toNanos() + config.preferredAckTimeout().toNanos();
+        private Request(Event event) {
+            this.event = event;
+            partition = event.partition();
+            long admittedAt = clock.getAsLong();
+            deadline = admittedAt + config.timeout().toNanos();
+            fallbackAt = admittedAt + config.preferredAckTimeout().toNanos();
         }
         private synchronized boolean canDispatch() {
-            return !closed && snapshot == null && clock.getAsLong() - deadline < 0;
+            return !closed && responseSnapshot == null && clock.getAsLong() - deadline < 0;
         }
-        private synchronized void captureGeneration(int side) { sentGeneration[side] = generations.get(side); }
+        private synchronized void captureGeneration(int side) { attempts[side].generation = generations.get(side); }
         private synchronized void schedule(int side) {
-            if (scheduled[side] || !canDispatch()) { return; }
-            scheduled[side] = true;
-            awaiting.put(attempts[side], this);
+            var attempt = attempts[side];
+            if (attempt.scheduled || !canDispatch()) { return; }
+            attempt.scheduled = true;
+            requestsByAttemptId.put(attempt.id, this);
             try { dispatchers.get(side).execute(() -> dispatch(this, side)); }
             catch (java.util.concurrent.RejectedExecutionException stopped) { finished(side, null, stopped); }
         }
         private synchronized void fallbackIfNeeded() {
-            int preferred = event.partition();
-            if (rawOffsets[preferred] == null && clock.getAsLong() - fallbackAt >= 0) { schedule(1 - preferred); }
+            if (attempts[partition].rawOffset == null && clock.getAsLong() - fallbackAt >= 0) {
+                schedule(1 - partition);
+            }
         }
         private void finished(int side, RecordMetadata metadata, Exception error) {
             PublishResult result;
             synchronized (this) {
-                if (done[side]) { return; }
-                if (clock.getAsLong() - deadline >= 0 && snapshot == null) { freeze("deadline elapsed"); }
-                done[side] = true;
-                if (snapshot == null) {
+                var attempt = attempts[side];
+                if (attempt.sendFinished) { return; }
+                if (clock.getAsLong() - deadline >= 0 && responseSnapshot == null) { freezeResponse("deadline elapsed"); }
+                attempt.sendFinished = true;
+                if (responseSnapshot == null) {
                     if (metadata != null && error == null && metadata.hasOffset()
-                            && metadata.partition() == event.partition() && metadata.topic().equals(config.topic())) {
-                        rawOffsets[side] = metadata.offset();
-                        outcomes[side] = new PublishResult.BrokerResult(ACKNOWLEDGED, metadata.offset(), null);
-                        if (side == event.partition() && fallbackTask != null) { fallbackTask.cancel(false); }
-                        if (early[side] != null) { applyReceipt(side, early[side]); }
+                            && metadata.partition() == partition && metadata.topic().equals(config.topic())) {
+                        attempt.rawOffset = metadata.offset();
+                        attempt.outcome = new PublishResult.BrokerResult(ACKNOWLEDGED, metadata.offset(), null);
+                        if (side == partition && fallbackTask != null) { fallbackTask.cancel(false); }
+                        if (attempt.earlyReceipt != null) { applyReceipt(side, attempt.earlyReceipt); }
                     } else if (error != null || metadata != null) {
-                        if (outcomes[side].delivery() != ACKNOWLEDGED) {
-                            outcomes[side] = new PublishResult.BrokerResult(FAILED, null,
+                        if (attempt.outcome.delivery() != ACKNOWLEDGED) {
+                            attempt.outcome = new PublishResult.BrokerResult(FAILED, null,
                                     error == null ? "InvalidMetadata" : error.getClass().getSimpleName());
                         }
-                        if (side == event.partition()) { schedule(1 - side); }
+                        if (side == partition) { schedule(1 - side); }
                     }
-                    if (ackCount() == 2) { freeze("both storage ACKs confirmed"); }
-                    else if (scheduled[0] && scheduled[1] && done[0] && done[1] && ackCount() == 0) {
-                        freeze("no native write acknowledged");
+                    if (ackCount() == 2) { freezeResponse("both storage ACKs confirmed"); }
+                    else if (attempts[0].sendFinished && attempts[1].sendFinished && ackCount() == 0) {
+                        freezeResponse("no native write acknowledged");
                     }
                 }
                 releaseIfSettled();
-                result = snapshot;
+                result = responseSnapshot;
             }
             if (result != null) { response.complete(result); }
         }
-        private void receipt(int side, io.github.keemgdeok.kafkaactiveactive.replication.ReplicationAck ack,
+        private void receipt(int side, ReplicationAck ack,
                              AcknowledgementReader.Generation actual) {
             PublishResult result;
             synchronized (this) {
-                if (snapshot != null) { return; }
-                if (clock.getAsLong() - deadline >= 0) { freeze("deadline elapsed"); }
-                else if (!scheduled[side] || !attempts[side].equals(ack.attempt())
-                        || !event.eventId().equals(ack.eventId()) || event.partition() != ack.partition()
+                if (responseSnapshot != null) { return; }
+                var attempt = attempts[side];
+                if (clock.getAsLong() - deadline >= 0) { freezeResponse("deadline elapsed"); }
+                else if (!attempt.scheduled || !attempt.id.equals(ack.attempt())
+                        || !event.eventId().equals(ack.eventId()) || partition != ack.partition()
                         || !java.util.Arrays.equals(EventCodec.hash(event.key(), event.payload()), ack.hash())
-                        || sentGeneration[side] == null || !sentGeneration[side].equals(actual)
+                        || attempt.generation == null || !attempt.generation.equals(actual)
                         || !actual.source().equals(ack.source()) || !actual.target().equals(ack.target())) {
                     invalidReceipts.incrementAndGet();
-                } else if (rawOffsets[side] == null) { early[side] = ack; }
+                } else if (attempt.rawOffset == null) { attempt.earlyReceipt = ack; }
                 else { applyReceipt(side, ack); }
-                if (snapshot == null && ackCount() == 2) { freeze("raw and replicated storage ACKs confirmed"); }
+                if (responseSnapshot == null && ackCount() == 2) { freezeResponse("raw and replicated storage ACKs confirmed"); }
                 releaseIfSettled();
-                result = snapshot;
+                result = responseSnapshot;
             }
             if (result != null) { response.complete(result); }
         }
-        private void applyReceipt(int side, io.github.keemgdeok.kafkaactiveactive.replication.ReplicationAck ack) {
-            if (!java.util.Objects.equals(rawOffsets[side], ack.sourceOffset())) {
+        private void applyReceipt(int side, ReplicationAck ack) {
+            if (!Objects.equals(attempts[side].rawOffset, ack.sourceOffset())) {
                 invalidReceipts.incrementAndGet(); return;
             }
-            if (outcomes[1 - side].evidence() != PublishResult.Evidence.DIRECT_RAW_ACK) {
-                outcomes[1 - side] = new PublishResult.BrokerResult(ACKNOWLEDGED, ack.targetOffset(), null,
+            var peer = attempts[1 - side];
+            if (peer.outcome.evidence() != PublishResult.Evidence.DIRECT_RAW_ACK) {
+                peer.outcome = new PublishResult.BrokerResult(ACKNOWLEDGED, ack.targetOffset(), null,
                         PublishResult.Evidence.REPLICATION_ACK);
             }
         }
         private void expire() {
             PublishResult result;
             synchronized (this) {
-                if (snapshot == null && clock.getAsLong() - deadline >= 0) { freeze("deadline elapsed"); }
-                releaseIfSettled(); result = snapshot;
+                if (responseSnapshot == null && clock.getAsLong() - deadline >= 0) { freezeResponse("deadline elapsed"); }
+                releaseIfSettled(); result = responseSnapshot;
             }
             if (result != null) { response.complete(result); }
         }
         private void finishOnClose() {
             PublishResult result;
             synchronized (this) {
-                if (snapshot == null) { freeze("publisher closed before both ACKs"); }
-                release(); result = snapshot;
+                if (responseSnapshot == null) { freezeResponse("publisher closed before both ACKs"); }
+                release(); result = responseSnapshot;
             }
             response.complete(result);
         }
         private int ackCount() {
-            return (outcomes[0].delivery() == ACKNOWLEDGED ? 1 : 0)
-                    + (outcomes[1].delivery() == ACKNOWLEDGED ? 1 : 0);
+            return (attempts[0].outcome.delivery() == ACKNOWLEDGED ? 1 : 0)
+                    + (attempts[1].outcome.delivery() == ACKNOWLEDGED ? 1 : 0);
         }
-        private boolean independentEvidence() {
-            if (outcomes[0].evidence() == PublishResult.Evidence.REPLICATION_ACK
-                    || outcomes[1].evidence() == PublishResult.Evidence.REPLICATION_ACK) { return true; }
-            var a = sentGeneration[0]; var b = sentGeneration[1];
+        private boolean hasIndependentAckEvidence() {
+            if (attempts[0].outcome.evidence() == PublishResult.Evidence.REPLICATION_ACK
+                    || attempts[1].outcome.evidence() == PublishResult.Evidence.REPLICATION_ACK) { return true; }
+            var a = attempts[0].generation;
+            var b = attempts[1].generation;
             return a != null && b != null && a.source().equals(b.target()) && a.target().equals(b.source())
                     && !a.source().clusterId().equals(b.source().clusterId());
         }
-        private void freeze(String reason) {
+        private void freezeResponse(String reason) {
             int count = ackCount();
-            snapshot = new PublishResult(event.eventId(), event.partition(),
-                    count == 2 && independentEvidence() ? CONFIRMED : count >= 1 ? ACCEPTED_DEGRADED : UNKNOWN,
-                    outcomes[0], outcomes[1], count == 2 && !independentEvidence()
+            boolean confirmed = count == 2 && hasIndependentAckEvidence();
+            responseSnapshot = new PublishResult(event.eventId(), partition,
+                    confirmed ? CONFIRMED : count >= 1 ? ACCEPTED_DEGRADED : UNKNOWN,
+                    attempts[0].outcome, attempts[1].outcome, count == 2 && !confirmed
                             ? "two ACKs observed without distinct native log identities" : reason);
             if (deadlineTask != null) { deadlineTask.cancel(false); }
             if (fallbackTask != null) { fallbackTask.cancel(false); }
-            for (var attempt : attempts) { awaiting.remove(attempt, this); }
-            early[0] = null; early[1] = null;
+            for (var attempt : attempts) {
+                requestsByAttemptId.remove(attempt.id, this);
+                attempt.earlyReceipt = null;
+            }
         }
         private void releaseIfSettled() {
-            if (snapshot != null && (!scheduled[0] || done[0]) && (!scheduled[1] || done[1])) { release(); }
+            if (responseSnapshot != null && attempts[0].settled() && attempts[1].settled()) { release(); }
         }
         private void release() {
             if (!released) { released = true; active.remove(this); permits.release(); }

@@ -157,7 +157,6 @@ class GroupTransitionIntegrationTest {
 
     @Test void failedRecoveryProducesNoTargetConsumerOrOffsetReset() throws Exception {
         var settings = scenario();
-        // Corrupt input is rejected by data recovery, before any target consumer can start.
         try (var producer = new KafkaProducer<byte[], byte[]>(Map.of(
                 "bootstrap.servers", KAFKA.a.getBootstrapServers(), "key.serializer", ByteArraySerializer.class,
                 "value.serializer", ByteArraySerializer.class))) {
@@ -271,7 +270,7 @@ class GroupTransitionIntegrationTest {
                             .get(settings.groupId()).members().isEmpty();
                 } catch (Exception notReady) { return false; }
             });
-            assertFalse(old.stopped()); // Missing group membership is not process termination.
+            assertFalse(old.stopped());
             old.release();
             await(() -> old.lastCommit() != null);
             assertEquals(CommitResult.Status.UNKNOWN, old.lastCommit().status());

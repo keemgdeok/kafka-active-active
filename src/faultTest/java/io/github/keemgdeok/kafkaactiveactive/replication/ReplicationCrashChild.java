@@ -6,7 +6,6 @@ import java.util.Map;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.support.CrashProcess;
 
-/** Actual lost process memory and orphan native transactions, not a thrown exception. */
 public final class ReplicationCrashChild {
     private ReplicationCrashChild() {}
     static Event input(int seed) {

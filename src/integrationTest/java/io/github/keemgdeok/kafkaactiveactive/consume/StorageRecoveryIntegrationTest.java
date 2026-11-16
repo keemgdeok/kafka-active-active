@@ -79,7 +79,7 @@ class StorageRecoveryIntegrationTest {
                 oldCluster = boundary.clusterId(); oldLedger = boundary.topicId(); oldInput = ledger.businessTopicId();
             }
             Files.writeString(diagnostics.resolve("kafka-a-before.log"), pair.a.getLogs());
-            pair.a.stop(); // Remove the container and all of its ephemeral Kafka storage, including group offsets.
+            pair.a.stop();
             replacement.start();
             var restoredAddress = Map.<String, Object>of("bootstrap.servers", replacement.getBootstrapServers());
             assertEquals(originalAddress, restoredAddress);

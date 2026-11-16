@@ -10,7 +10,6 @@ import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.common.KafkaFuture;
 
-/** Verifies that the two bootstrap configurations identify independent Kafka clusters. */
 public final class KafkaTopologyVerifier {
     private KafkaTopologyVerifier() {}
 

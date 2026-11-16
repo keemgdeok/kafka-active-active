@@ -136,7 +136,7 @@ class ActiveKafkaConsumerIntegrationTest {
         }
         assertEquals(-1, offset(settings));
         try (var consumer = consumer(settings)) {
-            var batch = awaitBatch(consumer); // initTransactions aborts the old in-flight transaction.
+            var batch = awaitBatch(consumer);
             try (var ledger = new CompletionLedger(settings, KAFKA.aProperties())) {
                 assertEquals(0, ledger.replay(ledger.snapshot()).size());
             }
@@ -264,8 +264,6 @@ class ActiveKafkaConsumerIntegrationTest {
                     .all().get(10, TimeUnit.SECONDS);
         }
         publish(settings, List.of(event("new-0", (byte) 2), event("new-1", (byte) 3)));
-        // Topic deletion can clear Kafka's group offsets. Explicitly restore the stale checkpoint
-        // to reproduce the unsafe offset reuse that the SDK must reject.
         try (Admin admin = Admin.create(KAFKA.aProperties())) {
             admin.alterConsumerGroupOffsets(settings.groupId(), Map.of(new TopicPartition(settings.topic(), 0), oldOffset))
                     .all().get(10, TimeUnit.SECONDS);

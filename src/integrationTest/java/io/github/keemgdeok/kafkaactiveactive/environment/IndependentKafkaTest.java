@@ -31,7 +31,6 @@ import org.testcontainers.kafka.KafkaContainer;
 
 @Testcontainers
 class IndependentKafkaTest {
-    // apache/kafka:4.3.2, pinned to the multi-platform manifest.
     private static final String IMAGE = "apache/kafka@sha256:852a0d49fc4e656b022e7f23785411802c9a088c78a7c5e39f33969de9c227a7";
     private static final String TOPIC = "events";
 

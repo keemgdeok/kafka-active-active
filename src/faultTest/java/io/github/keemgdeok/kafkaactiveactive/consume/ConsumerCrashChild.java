@@ -7,7 +7,6 @@ import io.github.keemgdeok.kafkaactiveactive.support.CrashProcess;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 import io.github.keemgdeok.kafkaactiveactive.verification.EventDataset;
 
-/** Test-only entry point; never part of the published SDK artifact. */
 public final class ConsumerCrashChild {
     private ConsumerCrashChild() {}
     public static void main(String[] args) {
@@ -47,8 +46,6 @@ public final class ConsumerCrashChild {
                 i<2?"kafka":"hello",java.nio.ByteBuffer.allocate(8).putInt(seed).putInt(i).array())).toList();
     }
     static Event input(int seed) {
-        // Small consecutive Random seeds can share their first key. Explicitly alternate the
-        // partition so the repeated crash windows exercise both stable transactional identities.
         return EventDataset.generate(32, seed, false).stream().filter(event -> event.partition() == seed % 2)
                 .findFirst().orElseThrow();
     }

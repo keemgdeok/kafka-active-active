@@ -9,6 +9,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -20,20 +21,17 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.errors.AuthorizationException;
 import org.apache.kafka.common.errors.ProducerFencedException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.WakeupException;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
 import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
 import io.github.keemgdeok.kafkaactiveactive.internal.KafkaAccess;
 
-/**
- * Explicit SDK lifecycle; one service owner per topic/pair. RAWs are copied once per committed
- * source position. A target append and source progress are not a distributed transaction:
- * a crash between them can duplicate physical records.
- */
 public final class ReplicationService implements AutoCloseable {
     public enum State { STOPPED, CONNECTING, RUNNING, RETRYING, FAILED, CLOSED }
     public record DirectionStatus(State state, LogIdentity source, LogIdentity target,
@@ -43,6 +41,7 @@ public final class ReplicationService implements AutoCloseable {
     public record Status(DirectionStatus aToB, DirectionStatus bToA, boolean closed) {}
     enum Stage { BATCH_READ, BEFORE_TARGET_APPEND, AFTER_TARGET_ACK, BEFORE_SOURCE_COMMIT, AFTER_SOURCE_COMMIT }
     record FaultPoint(Stage stage, int sourceSide, int partition, long offset, int batchSize) {}
+    private static final int MIN_BATCH_BYTES = 1024 * 1024;
     private static final System.Logger LOG = System.getLogger(ReplicationService.class.getName());
     private final ReplicationConfig config;
     private final Consumer<FaultPoint> hook;
@@ -133,14 +132,13 @@ public final class ReplicationService implements AutoCloseable {
                         long end = deadline(config.operationTimeout());
                         var sourceId = source.identity(config.topic(), end, true);
                         var targetId = target.identity(config.topic(), end, true);
-                        config.groupId(sourceId, targetId); // Reject aliases resolving to the same native Kafka.
+                        config.groupId(sourceId, targetId);
                         publish(State.CONNECTING, sourceId, targetId, Map.of(), null);
                         source.confirmationTopic(config, end);
                         try (var session = new Session(sourceId, targetId, source, target)) {
-                            process(source, target, session);
+                            replicateUntilClosed(source, target, session);
                         }
                     } catch (GenerationChanged changed) {
-                        // New native generation gets a different group/transaction namespace.
                     } catch (RuntimeException failure) {
                         if (closed.get()) { break; }
                         Throwable cause = failure;
@@ -180,43 +178,43 @@ public final class ReplicationService implements AutoCloseable {
                 }
             }
         }
-        private void process(KafkaAccess source, KafkaAccess target, Session session) {
+        private void replicateUntilClosed(KafkaAccess source, KafkaAccess target, Session session) {
             long nextProbe = 0;
             while (!closed.get()) {
                 ConsumerRecords<byte[], byte[]> records;
                 try { records = session.consumer.poll(Duration.ofMillis(250)); }
                 catch (org.apache.kafka.clients.consumer.InvalidOffsetException invalid) {
-                    requireGeneration(source, target, session, deadline(config.operationTimeout()));
+                    requireSameLogIdentities(source, target, session, deadline(config.operationTimeout()));
                     throw invalid;
                 }
                 if (records.isEmpty()) {
                     if (System.nanoTime() >= nextProbe) {
-                        requireGeneration(source, target, session, deadline(config.operationTimeout()));
+                        requireSameLogIdentities(source, target, session, deadline(config.operationTimeout()));
                         nextProbe = System.nanoTime() + Duration.ofSeconds(1).toNanos();
                     }
                     continue;
                 }
-                requireGeneration(source, target, session, deadline(config.operationTimeout()));
+                requireSameLogIdentities(source, target, session, deadline(config.operationTimeout()));
                 var first = records.iterator().next();
                 hook.accept(new FaultPoint(Stage.BATCH_READ, side, first.partition(), first.offset(), records.count()));
                 var acknowledgements = new ArrayList<ReplicationAck>();
                 var progress = new HashMap<TopicPartition, OffsetAndMetadata>();
-                var rewind = new HashMap<TopicPartition, OffsetAndMetadata>();
-                records.forEach(r -> rewind.putIfAbsent(new TopicPartition(r.topic(), r.partition()),
+                var rewindOffsets = new HashMap<TopicPartition, OffsetAndMetadata>();
+                records.forEach(r -> rewindOffsets.putIfAbsent(new TopicPartition(r.topic(), r.partition()),
                         new OffsetAndMetadata(r.offset(), r.leaderEpoch(), "")));
                 long budgetEnd = budgetClock.getAsLong() + config.operationTimeout().toNanos();
                 int handled = 0;
                 long rawBytes = 0;
-                long byteBudget = Math.max(1_048_576L, (long) config.maxEventBytes() + 1_024);
-                boolean unavailable = false;
-                ConsumerRecord<byte[], byte[]> last = null;
+                long byteBudget = Math.max(MIN_BATCH_BYTES, config.maxEventBytes() + EventConstraints.RECORD_OVERHEAD_BYTES);
+                boolean targetAckUnavailable = false;
+                ConsumerRecord<byte[], byte[]> lastHandled = null;
                 for (var record : records) {
-                    // Commit an ACKed prefix rather than replaying an entire slow batch forever.
                     if (handled > 0 && budgetClock.getAsLong() >= budgetEnd) { break; }
                     var identity = EventCodec.identity(record, config.maxEventBytes());
                     if (EventCodec.kind(record) == EventCodec.Kind.RAW) {
                         long bytes = (long) record.key().length + record.value().length
-                                + identity.id().getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1_024;
+                                + identity.id().getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+                                + EventConstraints.RECORD_OVERHEAD_BYTES;
                         if (handled > 0 && rawBytes + bytes > byteBudget) { break; }
                         try {
                             point(Stage.BEFORE_TARGET_APPEND, record);
@@ -231,12 +229,12 @@ public final class ReplicationService implements AutoCloseable {
                             acknowledgements.add(new ReplicationAck(EventCodec.attempt(record), identity.id(), identity.hash(),
                                     record.partition(), session.sourceId, record.offset(), session.targetId, metadata.offset()));
                             rawBytes += bytes;
-                        } catch (RetriableException retry) { unavailable = true; break; }
+                        } catch (RetriableException retry) { targetAckUnavailable = true; break; }
                     }
                     progress.put(new TopicPartition(record.topic(), record.partition()),
                             new OffsetAndMetadata(record.offset() + 1, record.leaderEpoch(), ""));
                     handled++;
-                    last = record;
+                    lastHandled = record;
                 }
                 if (handled > 0) {
                     for (var partition : records.partitions()) {
@@ -247,36 +245,23 @@ public final class ReplicationService implements AutoCloseable {
                         }
                     }
                     long end = deadline(config.operationTimeout());
-                    requireGeneration(source, target, session, end);
-                    session.sourceTransaction.beginTransaction();
-                    var receipts = new ArrayList<java.util.concurrent.Future<org.apache.kafka.clients.producer.RecordMetadata>>();
-                    for (var ack : acknowledgements) {
-                        receipts.add(session.sourceTransaction.send(ack.record(config.confirmationTopic())));
-                    }
-                    for (var receipt : receipts) { await(receipt, end); }
-                    point(Stage.BEFORE_SOURCE_COMMIT, last);
-                    session.sourceTransaction.sendOffsetsToTransaction(progress, session.consumer.groupMetadata());
-                    session.sourceTransaction.commitTransaction();
-                    point(Stage.AFTER_SOURCE_COMMIT, last);
-                    copied += acknowledgements.size();
-                    var offsets = new HashMap<Integer, Long>(status.get().committedOffsets());
-                    progress.forEach((tp, offset) -> offsets.put(tp.partition(), offset.offset()));
-                    publish(State.RUNNING, session.sourceId, session.targetId, offsets, null);
+                    requireSameLogIdentities(source, target, session, end);
+                    commitSourceProgress(session, acknowledgements, progress, lastHandled, end);
                 }
                 if (handled < records.count()) {
-                    progress.forEach(rewind::put);
+                    progress.forEach(rewindOffsets::put);
                     session.pausedForRetry = true;
                     session.consumer.pause(session.consumer.assignment());
-                    if (unavailable) {
+                    if (targetAckUnavailable) {
                         publish(State.RETRYING, session.sourceId, session.targetId,
                                 status.get().committedOffsets(), "target ACK unavailable");
                     }
-                    session.consumer.poll(unavailable ? Duration.ofMillis(250) : Duration.ZERO).forEach(r -> {
+                    session.consumer.poll(targetAckUnavailable ? Duration.ofMillis(250) : Duration.ZERO).forEach(r -> {
                         var tp = new TopicPartition(r.topic(), r.partition());
                         var next = new OffsetAndMetadata(r.offset(), r.leaderEpoch(), "");
-                        rewind.merge(tp, next, (left, right) -> left.offset() <= right.offset() ? left : right);
+                        rewindOffsets.merge(tp, next, (left, right) -> left.offset() <= right.offset() ? left : right);
                     });
-                    for (var entry : rewind.entrySet()) {
+                    for (var entry : rewindOffsets.entrySet()) {
                         if (session.consumer.assignment().contains(entry.getKey())) {
                             session.consumer.seek(entry.getKey(), entry.getValue());
                         }
@@ -286,7 +271,28 @@ public final class ReplicationService implements AutoCloseable {
                 }
             }
         }
-        private void requireGeneration(KafkaAccess source, KafkaAccess target, Session session, long end) {
+
+        private void commitSourceProgress(Session session, List<ReplicationAck> acknowledgements,
+                                          Map<TopicPartition, OffsetAndMetadata> progress,
+                                          ConsumerRecord<byte[], byte[]> lastHandled, long end) {
+            var transaction = session.sourceTransaction;
+            transaction.beginTransaction();
+            List<Future<RecordMetadata>> receipts = new ArrayList<>(acknowledgements.size());
+            for (var ack : acknowledgements) {
+                receipts.add(transaction.send(ack.record(config.confirmationTopic())));
+            }
+            for (var receipt : receipts) { await(receipt, end); }
+            point(Stage.BEFORE_SOURCE_COMMIT, lastHandled);
+            transaction.sendOffsetsToTransaction(progress, session.consumer.groupMetadata());
+            transaction.commitTransaction();
+            point(Stage.AFTER_SOURCE_COMMIT, lastHandled);
+            copied += acknowledgements.size();
+            var offsets = new HashMap<>(status.get().committedOffsets());
+            progress.forEach((partition, offset) -> offsets.put(partition.partition(), offset.offset()));
+            publish(State.RUNNING, session.sourceId, session.targetId, offsets, null);
+        }
+
+        private void requireSameLogIdentities(KafkaAccess source, KafkaAccess target, Session session, long end) {
             if (!session.sourceId.equals(source.identity(config.topic(), end, true))
                     || !session.targetId.equals(target.identity(config.topic(), end, true))) {
                 throw new GenerationChanged();
@@ -321,7 +327,7 @@ public final class ReplicationService implements AutoCloseable {
                     consumer.subscribe(List.of(config.topic()), new ConsumerRebalanceListener() {
                         @Override public void onPartitionsRevoked(Collection<TopicPartition> partitions) {}
                         @Override public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                            requireGeneration(sourceAccess, targetAccess, Session.this, deadline(config.operationTimeout()));
+                            requireSameLogIdentities(sourceAccess, targetAccess, Session.this, deadline(config.operationTimeout()));
                             var offsets = consumer.committed(java.util.Set.copyOf(partitions), config.operationTimeout());
                             var beginnings = consumer.beginningOffsets(partitions, config.operationTimeout());
                             var ends = consumer.endOffsets(partitions, config.operationTimeout());
@@ -348,7 +354,7 @@ public final class ReplicationService implements AutoCloseable {
             @Override public void close() {
                 boolean interrupted = Thread.interrupted();
                 try { consumer.close(org.apache.kafka.clients.consumer.CloseOptions.timeout(Duration.ofSeconds(1))); }
-                catch (WakeupException | org.apache.kafka.common.errors.InterruptException ignored) { /* closing */ }
+                catch (WakeupException | org.apache.kafka.common.errors.InterruptException ignored) { }
                 finally {
                     try { if (targetProducer != null) { targetProducer.close(Duration.ZERO); } }
                     finally {

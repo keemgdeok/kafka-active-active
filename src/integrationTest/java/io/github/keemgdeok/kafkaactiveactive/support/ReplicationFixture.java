@@ -7,7 +7,6 @@ import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
 import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationConfig;
 import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationService;
 
-/** Tests explicitly own replication; this helper never starts it as a publisher side effect. */
 public final class ReplicationFixture {
     private ReplicationFixture() {}
     public static ReplicationService start(String topic, Map<String, Object> a, Map<String, Object> b) {

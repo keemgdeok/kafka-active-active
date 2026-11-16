@@ -3,7 +3,6 @@ package io.github.keemgdeok.kafkaactiveactive.replication;
 import java.util.Objects;
 import java.nio.charset.StandardCharsets;
 
-/** Native identities, never bootstrap addresses or logical A/B labels. */
 public record LogIdentity(String clusterId, String topicId) {
     public LogIdentity {
         Objects.requireNonNull(clusterId, "clusterId");

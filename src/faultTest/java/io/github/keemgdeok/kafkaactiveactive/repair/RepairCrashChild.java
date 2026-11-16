@@ -6,7 +6,6 @@ import java.util.function.Consumer;
 import io.github.keemgdeok.kafkaactiveactive.support.CrashProcess;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 
-/** Crashes after an actual target ACK, before any in-memory repair progress can survive. */
 public final class RepairCrashChild {
     private RepairCrashChild() {}
     public static void main(String[] args) {

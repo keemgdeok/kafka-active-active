@@ -3,7 +3,6 @@ package io.github.keemgdeok.kafkaactiveactive.repair;
 import java.time.Instant;
 import java.util.Map;
 
-/** Covers the captured finite boundaries, not subsequent writes to the live tail. */
 public record RepairReport(String runId, Instant startedAt, Instant completedAt,
                            LogBoundary clusterA, LogBoundary clusterB,
                            int uniqueEvents, long indexedRecords, long estimatedIndexBytes,

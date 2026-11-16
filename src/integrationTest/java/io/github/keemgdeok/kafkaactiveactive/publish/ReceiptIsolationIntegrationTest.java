@@ -66,14 +66,11 @@ class ReceiptIsolationIntegrationTest {
                 try {
                     transaction.initTransactions(); transaction.beginTransaction();
                     transaction.send(valid.record(config.confirmationTopic())).get(5,TimeUnit.SECONDS);
-                    // Keep it OPEN for the whole publish deadline, not a race against abort visibility.
                     var result = response.get(10,TimeUnit.SECONDS);
                     assertEquals(PublishResult.Status.ACCEPTED_DEGRADED,result.status());
                     assertTrue(NativeLog.read(PAIR.bProperties(),topic).isEmpty(),"no worker or fallback RAW on receipt lag");
                     transaction.abortTransaction();
                 } finally { transaction.close(Duration.ZERO); }
-                // Make a genuine peer copy, then a committed late receipt. Neither changes prior history
-                // nor supplies evidence for the next RAW attempt with the same business ID.
                 NativeLog.write(PAIR.bProperties(),EventCodec.replica(topic,record,1_024));
                 NativeLog.write(PAIR.aProperties(),valid.record(config.confirmationTopic()));
                 assertEquals(PublishResult.Status.ACCEPTED_DEGRADED,response.join().status());
