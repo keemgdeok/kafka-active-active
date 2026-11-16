@@ -1,6 +1,5 @@
 package io.github.keemgdeok.kafkaactiveactive.repair;
 
-/** A failed run can have acknowledged partial copies; rerun from a fresh log snapshot. */
 public final class RepairException extends RuntimeException {
     private static final long serialVersionUID = 1L;
     public enum Reason { CONFLICT, INDEX_LIMIT, INVALID_RECORD, INVALID_TOPOLOGY,

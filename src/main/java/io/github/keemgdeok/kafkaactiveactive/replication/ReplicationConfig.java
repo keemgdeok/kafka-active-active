@@ -5,12 +5,18 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.HexFormat;
-import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
+import java.util.Objects;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
 
 public record ReplicationConfig(String topic, Duration operationTimeout, int maxBatchRecords,
                                 int maxEventBytes, Duration closeTimeout) {
     public ReplicationConfig {
-        new PublishConfig(topic, operationTimeout, 1, maxEventBytes, closeTimeout);
+        EventConstraints.validate(topic, maxEventBytes);
+        Objects.requireNonNull(operationTimeout, "operationTimeout");
+        Objects.requireNonNull(closeTimeout, "closeTimeout");
+        if (closeTimeout.toMillis() < 1 || closeTimeout.compareTo(Duration.ofMinutes(5)) > 0) {
+            throw new IllegalArgumentException("closeTimeout must be between 1ms and 5min");
+        }
         if (operationTimeout.compareTo(Duration.ofSeconds(1)) < 0
                 || operationTimeout.compareTo(Duration.ofSeconds(30)) > 0
                 || maxBatchRecords < 1 || maxBatchRecords > 1_000) {
@@ -18,7 +24,8 @@ public record ReplicationConfig(String topic, Duration operationTimeout, int max
         }
     }
     public static ReplicationConfig defaults(String topic) {
-        return new ReplicationConfig(topic, Duration.ofSeconds(5), 100, 900_000, Duration.ofSeconds(5));
+        return new ReplicationConfig(topic, Duration.ofSeconds(5), 100, EventConstraints.DEFAULT_MAX_EVENT_BYTES,
+                Duration.ofSeconds(5));
     }
     public String confirmationTopic() { return "__kaa_replication_ack_" + digest(topic); }
     public String groupId(LogIdentity source, LogIdentity target) {

@@ -41,7 +41,6 @@ import org.testcontainers.kafka.KafkaContainer;
 @Testcontainers
 @SuppressWarnings("try")
 class RoutedKafkaPublisherIntegrationTest {
-    // apache/kafka:4.3.2 multi-platform manifest; use the digest form supported by Testcontainers.
     private static final String IMAGE = "apache/kafka@sha256:852a0d49fc4e656b022e7f23785411802c9a088c78a7c5e39f33969de9c227a7";
     @Container
     private static final KafkaContainer A = kafka("QaH9lFnjS0m1L8o7Yp3Wbg");
@@ -49,7 +48,6 @@ class RoutedKafkaPublisherIntegrationTest {
     private static final KafkaContainer B = kafka("PbK8mGojT1n2M9p8Zq4Xch");
 
     private static KafkaContainer kafka(String clusterId) {
-        // Docker may reallocate anonymous host ports on stop/start. Keep the advertised listener stable.
         int hostPort;
         try (ServerSocket reservation = new ServerSocket(0)) {
             hostPort = reservation.getLocalPort();

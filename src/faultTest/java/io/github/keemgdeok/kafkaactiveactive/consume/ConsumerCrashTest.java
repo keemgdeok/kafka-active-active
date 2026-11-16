@@ -63,7 +63,6 @@ class ConsumerCrashTest {
                 var offset = offsets.get(new org.apache.kafka.common.TopicPartition(topic, events.getFirst().partition()));
                 assertEquals(completed ? 1L : -1L, offset == null ? -1L : offset.offset());
             }
-            // CrashProcess returns only after actual OS process exit. Empty native membership alone is not our stop proof.
             var transition = new GroupTransition(settings, KAFKA.aProperties(), KAFKA.bProperties(), () -> true).prepare();
             assertEquals(completed ? 1 : 0, transition.completionReport().completedIds());
             int calls = 0;
@@ -144,7 +143,6 @@ class ConsumerCrashTest {
         }
     }
 
-    /** Input bytes are immutable; every crash still gets a fresh process, group and completion topic. */
     private static String inputTopic(int seed, boolean multi) throws Exception {
         String key=seed+":"+multi;
         String existing=INPUT_TOPICS.get(key);
@@ -180,9 +178,6 @@ class ConsumerCrashTest {
     private static void releaseExitedChildMembershipAndAwaitEmpty(ConsumerSettings settings) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
         try (Admin admin = Admin.create(KAFKA.aProperties())) {
-            // The caller has already confirmed actual child OS exit via CrashProcess.
-            // Clear only its dead native membership; offsets/history are never reset here.
-            // Automatic rebalance/lease expiry remains covered by the integration suite.
             admin.removeMembersFromConsumerGroup(settings.groupId(),
                     new org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions())
                     .all().get(5, TimeUnit.SECONDS);

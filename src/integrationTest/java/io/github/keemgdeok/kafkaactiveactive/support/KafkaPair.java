@@ -11,7 +11,6 @@ import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.testcontainers.kafka.KafkaContainer;
 
-/** Shared real-Kafka fixture for consumer/group/fault verification. Docker absence is a failure. */
 public final class KafkaPair implements AutoCloseable {
     public static final String IMAGE = "apache/kafka@sha256:852a0d49fc4e656b022e7f23785411802c9a088c78a7c5e39f33969de9c227a7";
     public final KafkaContainer a = broker("QaH9lFnjS0m1L8o7Yp3Wbg");

@@ -163,7 +163,7 @@ class RepairIntegrationTest {
                 var before = repair.runOnce();
                 assertEquals(2, before.copiedToB());
                 saveLog("storage-before", original);
-                original.stop(); // Remove the container and its ephemeral Kafka log storage.
+                original.stop();
                 replacement.start();
                 assertEquals(originalProperties, properties(replacement));
                 create(replacement, topic);
@@ -241,7 +241,6 @@ class RepairIntegrationTest {
         write(A, topic, List.of(event("seed", "kafka")));
         AtomicInteger generated = new AtomicInteger();
         RepairReport report;
-        // No streaming worker: the capture hook must introduce genuinely one-sided RAWs.
         var publishConfig=new PublishConfig(topic,Duration.ofSeconds(1),16,900_000,Duration.ofSeconds(2),Duration.ofMillis(900));
         try (var publisher = RoutedKafkaPublisher.open(publishConfig, properties(A), properties(B))) {
             var config = RepairConfig.defaults(topic);

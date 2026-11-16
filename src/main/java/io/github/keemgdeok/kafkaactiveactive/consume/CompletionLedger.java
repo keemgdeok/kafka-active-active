@@ -8,7 +8,10 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.LongSupplier;
 
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
+import io.github.keemgdeok.kafkaactiveactive.internal.KafkaAccess;
 import io.github.keemgdeok.kafkaactiveactive.repair.RepairReport;
 
 import org.apache.kafka.clients.admin.Admin;
@@ -26,7 +29,6 @@ import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 
-/** Kafka I/O for compacted completion topics. No native input consumer state is stored here. */
 final class CompletionLedger implements AutoCloseable {
     private final ConsumerSettings settings;
     private final Map<String, Object> properties;
@@ -35,6 +37,14 @@ final class CompletionLedger implements AutoCloseable {
     private KafkaProducer<byte[], byte[]> writer;
 
     CompletionLedger(ConsumerSettings settings, Map<String, Object> properties) {
+        this(settings, properties, () -> KafkaAccess.deadline(settings.operationTimeout()));
+    }
+
+    CompletionLedger(ConsumerSettings settings, Map<String, Object> properties, long deadline) {
+        this(settings, properties, () -> deadline);
+    }
+
+    private CompletionLedger(ConsumerSettings settings, Map<String, Object> properties, LongSupplier deadline) {
         this.settings = settings;
         this.properties = Map.copyOf(properties);
         if (!properties.containsKey("bootstrap.servers") || properties.containsKey("interceptor.classes")
@@ -46,7 +56,7 @@ final class CompletionLedger implements AutoCloseable {
         try {
             opened = new KafkaConsumer<>(readerProperties(settings, properties));
             reader = opened;
-            ensureTopic();
+            ensureTopic(deadline);
         } catch (RuntimeException failure) {
             try { if (opened != null) { opened.close(CloseOptions.timeout(Duration.ZERO)); } }
             finally { admin.close(Duration.ZERO); }
@@ -54,32 +64,30 @@ final class CompletionLedger implements AutoCloseable {
         }
     }
 
-    private void ensureTopic() {
+    private void ensureTopic(LongSupplier deadline) {
         String createdId = null;
         try {
-            var creation = admin.createTopics(List.of(new NewTopic(settings.completionTopic(), 2, (short) 1).configs(Map.of(
+            var creation = admin.createTopics(List.of(new NewTopic(settings.completionTopic(),
+                    EventConstraints.PARTITION_COUNT, (short) 1).configs(Map.of(
                     "cleanup.policy", "compact", "retention.ms", "-1", "retention.bytes", "-1"))));
-            await(creation.all());
-            createdId = await(creation.topicId(settings.completionTopic())).toString();
+            await(creation.all(), deadline.getAsLong());
+            createdId = await(creation.topicId(settings.completionTopic()), deadline.getAsLong()).toString();
         } catch (IllegalStateException failure) {
             if (!(rootCause(failure) instanceof TopicExistsException)) { throw failure; }
         }
-        awaitInitialMetadata(createdId);
-        snapshot();
+        awaitInitialMetadata(createdId, deadline.getAsLong());
+        snapshot(deadline);
     }
 
-    private void awaitInitialMetadata(String createdId) {
-        // CreateTopics ACK can precede broker visibility, especially after deletion/recreation.
-        // Poll fresh Admin metadata, not consumer metadata which may cache an empty result.
-        // Only initialization tolerates this transient state; subsequent snapshots fail closed.
-        long deadline = System.nanoTime() + settings.operationTimeout().toNanos();
+    private void awaitInitialMetadata(String createdId, long deadline) {
         while (true) {
             long remaining = deadline - System.nanoTime();
             if (remaining <= 0) { throw new IllegalStateException("completion topic metadata readiness deadline elapsed"); }
             try {
                 var topic = admin.describeTopics(List.of(settings.completionTopic())).allTopicNames()
                         .get(remaining, TimeUnit.NANOSECONDS).get(settings.completionTopic());
-                if (topic.partitions().size() != 2 || topic.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
+                if (topic.partitions().size() != EventConstraints.PARTITION_COUNT
+                        || topic.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
                     throw new IllegalStateException("completion topic must have two RF=1 partitions");
                 }
                 if ((createdId == null || createdId.equals(topic.topicId().toString()))
@@ -101,21 +109,31 @@ final class CompletionLedger implements AutoCloseable {
     }
 
     Snapshot snapshot() {
-        var description = await(admin.describeTopics(List.of(settings.completionTopic())).allTopicNames())
-                .get(settings.completionTopic());
-        if (description.partitions().size() != 2 || description.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
+        return snapshot(() -> KafkaAccess.deadline(settings.operationTimeout()));
+    }
+
+    Snapshot snapshot(long deadline) {
+        return snapshot(() -> deadline);
+    }
+
+    private Snapshot snapshot(LongSupplier deadline) {
+        var description = await(admin.describeTopics(List.of(settings.completionTopic())).allTopicNames(),
+                deadline.getAsLong()).get(settings.completionTopic());
+        if (description.partitions().size() != EventConstraints.PARTITION_COUNT
+                || description.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
             throw new IllegalStateException("completion topic must have two RF=1 partitions");
         }
         var resource = new ConfigResource(ConfigResource.Type.TOPIC, settings.completionTopic());
-        var config = await(admin.describeConfigs(List.of(resource)).all()).get(resource);
+        var config = await(admin.describeConfigs(List.of(resource)).all(), deadline.getAsLong()).get(resource);
         if (!"compact".equals(config.get("cleanup.policy").value())
                 || !"-1".equals(config.get("retention.ms").value()) || !"-1".equals(config.get("retention.bytes").value())) {
             throw new IllegalStateException("completion topic must retain compacted history without deletion");
         }
         var partitions = partitions();
-        return new Snapshot(await(admin.describeCluster().clusterId()), description.topicId().toString(),
-                reader.beginningOffsets(partitions, settings.operationTimeout()),
-                reader.endOffsets(partitions, settings.operationTimeout()));
+        return new Snapshot(await(admin.describeCluster().clusterId(), deadline.getAsLong()),
+                description.topicId().toString(),
+                reader.beginningOffsets(partitions, remaining(deadline.getAsLong())),
+                reader.endOffsets(partitions, remaining(deadline.getAsLong())));
     }
 
     CompletedIndex replay(Snapshot boundary) {
@@ -148,7 +166,7 @@ final class CompletionLedger implements AutoCloseable {
         verify(boundary, snapshot());
     }
 
-    private static void verify(Snapshot boundary, Snapshot now) {
+    static void verify(Snapshot boundary, Snapshot now) {
         if (!boundary.clusterId().equals(now.clusterId()) || !boundary.topicId().equals(now.topicId())
                 || boundary.end().entrySet().stream().anyMatch(e -> now.end().get(e.getKey()) < e.getValue())) {
             throw new IllegalStateException("completion log identity or end changed");
@@ -170,8 +188,19 @@ final class CompletionLedger implements AutoCloseable {
     }
 
     void append(CompletionMarker marker) {
+        await(writer().send(marker.record(settings.completionTopic())));
+    }
+
+    void append(CompletionMarker marker, long deadline) {
+        remaining(deadline);
+        var producer = writer();
+        remaining(deadline);
+        await(producer.send(marker.record(settings.completionTopic())), deadline);
+    }
+
+    private KafkaProducer<byte[], byte[]> writer() {
         if (writer == null) { writer = new KafkaProducer<>(writerProperties(settings, properties)); }
-        await(writer.send(marker.record(settings.completionTopic())));
+        return writer;
     }
 
     void requireGroupStopped() {
@@ -188,7 +217,7 @@ final class CompletionLedger implements AutoCloseable {
 
     void fenceStoppedGroup() {
         requireGroupStopped();
-        for (int partition = 0; partition < 2; partition++) {
+        for (int partition = 0; partition < EventConstraints.PARTITION_COUNT; partition++) {
             var producer = transactionProducer(partition);
             producer.close(Duration.ZERO);
         }
@@ -196,7 +225,8 @@ final class CompletionLedger implements AutoCloseable {
 
     String businessTopicId() {
         var topic = await(admin.describeTopics(List.of(settings.topic())).allTopicNames()).get(settings.topic());
-        if (topic.partitions().size() != 2 || topic.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
+        if (topic.partitions().size() != EventConstraints.PARTITION_COUNT
+                || topic.partitions().stream().anyMatch(p -> p.replicas().size() != 1)) {
             throw new IllegalStateException("business topic must have two RF=1 partitions");
         }
         return topic.topicId().toString();
@@ -242,8 +272,8 @@ final class CompletionLedger implements AutoCloseable {
         config.put("isolation.level", "read_committed");
         config.put("allow.auto.create.topics", false);
         config.put("max.poll.records", settings.maxBatchRecords());
-        config.put("fetch.max.bytes", 16 * 1024 * 1024);
-        config.put("max.partition.fetch.bytes", settings.maxEventBytes() + 1_024);
+        config.put("fetch.max.bytes", KafkaAccess.FETCH_MAX_BYTES);
+        config.put("max.partition.fetch.bytes", settings.maxEventBytes() + EventConstraints.RECORD_OVERHEAD_BYTES);
         return config;
     }
 
@@ -265,19 +295,29 @@ final class CompletionLedger implements AutoCloseable {
         config.put("max.block.ms", settings.operationTimeout().toMillis());
         config.put("linger.ms", 0);
         config.put("delivery.timeout.ms", (int) settings.operationTimeout().toMillis());
-        config.put("buffer.memory", 32L * 1024 * 1024);
-        config.put("max.request.size", settings.maxEventBytes() + 1_024);
+        config.put("buffer.memory", KafkaAccess.PRODUCER_BUFFER_BYTES);
+        config.put("max.request.size", settings.maxEventBytes() + EventConstraints.RECORD_OVERHEAD_BYTES);
         return config;
     }
 
     private <T> T await(Future<T> future) {
-        try { return future.get(settings.operationTimeout().toNanos(), TimeUnit.NANOSECONDS); }
+        return await(future, KafkaAccess.deadline(settings.operationTimeout()));
+    }
+
+    private static <T> T await(Future<T> future, long deadline) {
+        try { return future.get(remaining(deadline).toNanos(), TimeUnit.NANOSECONDS); }
         catch (InterruptedException failure) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("completion operation interrupted", failure);
         } catch (ExecutionException | TimeoutException failure) {
             throw new IllegalStateException("completion operation failed", failure);
         }
+    }
+
+    private static Duration remaining(long deadline) {
+        long nanos = deadline - System.nanoTime();
+        if (nanos <= 0) { throw new IllegalStateException("completion operation deadline elapsed"); }
+        return Duration.ofNanos(nanos);
     }
 
     private List<TopicPartition> partitions() {

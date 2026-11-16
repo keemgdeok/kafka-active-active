@@ -10,7 +10,6 @@ import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 
-/** Pure batch selection and prefix-offset calculation, independent of Kafka I/O. */
 final class DeliveryWindow {
     private final List<ConsumerRecord<byte[], byte[]>> raw;
     private final Map<String, CompletionMarker> identities = new LinkedHashMap<>();

@@ -4,6 +4,7 @@ import static io.github.keemgdeok.kafkaactiveactive.publish.PublishResult.Status
 import static org.junit.jupiter.api.Assertions.*;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -15,6 +16,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.MockProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -45,6 +47,27 @@ class RoutedKafkaPublisherTest {
 
     RoutedKafkaPublisherTest() { publisher.observe(0, AB); publisher.observe(1, BA); }
     @AfterEach void close() { a.unblock.countDown(); b.unblock.countDown(); publisher.close(); }
+
+    @Test void invalidReaderPropertiesDoNotLeaveNativeProducersRunning() {
+        var aProperties = new HashMap<String, Object>();
+        aProperties.put("bootstrap.servers", "localhost:19092");
+        aProperties.put("unused.custom.property", null);
+        var bProperties = Map.<String, Object>of("bootstrap.servers", "localhost:29092");
+
+        var before = nativeProducerThreads();
+        assertThrows(NullPointerException.class,
+                () -> RoutedKafkaPublisher.open(PublishConfig.defaults("events"), aProperties, bProperties));
+        var remaining = nativeProducerThreads();
+        remaining.removeAll(before);
+        assertTrue(remaining.isEmpty(), () -> "producer threads left after failed open: " + remaining);
+    }
+
+    private static Set<Long> nativeProducerThreads() {
+        return Thread.getAllStackTraces().keySet().stream()
+                .filter(thread -> thread.getName().startsWith("kafka-producer-network-thread"))
+                .map(Thread::threadId)
+                .collect(Collectors.toSet());
+    }
 
     @Test void preferredRawAndReplicaAckConfirmTwoStoresWithoutSecondRaw() throws Exception {
         assertEquals(0, EVENT.partition());

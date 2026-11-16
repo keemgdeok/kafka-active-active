@@ -13,11 +13,6 @@ import io.github.keemgdeok.kafkaactiveactive.publish.RoutedKafkaPublisher;
 import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationConfig;
 import io.github.keemgdeok.kafkaactiveactive.replication.ReplicationService;
 
-/**
- * Producer application example. Set KAA_REPLICATION_ENABLED=true on one process per topic and
- * Kafka pair. Each input line contains event ID, key and UTF-8 payload separated by tabs.
- * End input to close the publisher and the replication service it owns.
- */
 public final class ProducerExample {
     private ProducerExample() {}
 

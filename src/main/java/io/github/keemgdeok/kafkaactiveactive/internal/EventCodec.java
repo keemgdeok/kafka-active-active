@@ -17,9 +17,7 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.header.internals.RecordHeaders;
-import org.apache.kafka.common.utils.Utils;
 
-/** Shared SDK wire format. This is an internal implementation API. */
 public final class EventCodec {
     public static final String EVENT_ID_HEADER = "kaa.event.id";
     public static final String FORMAT_HEADER = "kaa.format";
@@ -94,11 +92,11 @@ public final class EventCodec {
             throw invalid("unsupported format, null record bytes, or oversized event");
         }
         String eventId = text(id);
-        if (eventId.isBlank() || text(record.key()).isBlank()
-                || record.partition() != Utils.toPositive(Utils.murmur2(record.key())) % 2) {
+        String key = text(record.key());
+        if (eventId.isBlank() || key.isBlank() || record.partition() != EventConstraints.partition(record.key())) {
             throw invalid("invalid event ID, key or partition");
         }
-        return new Identity(eventId, hash(text(record.key()), record.value()));
+        return new Identity(eventId, hash(key, record.value()));
     }
 
     public static byte[] hash(String key, byte[] payload) {

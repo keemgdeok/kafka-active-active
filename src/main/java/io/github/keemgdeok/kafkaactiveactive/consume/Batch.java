@@ -5,7 +5,6 @@ import java.util.UUID;
 
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 
-/** Only one batch may be outstanding. Process a prefix; commit never skips an unfinished record. */
 public final class Batch {
     private final UUID token = UUID.randomUUID();
     private final List<Delivery> records;

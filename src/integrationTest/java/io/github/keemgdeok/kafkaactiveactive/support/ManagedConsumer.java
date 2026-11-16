@@ -17,7 +17,6 @@ import io.github.keemgdeok.kafkaactiveactive.consume.ActiveKafkaConsumer;
 import io.github.keemgdeok.kafkaactiveactive.consume.CommitResult;
 import io.github.keemgdeok.kafkaactiveactive.consume.ConsumerSettings;
 
-/** Test worker that owns all native consumer calls and publishes immutable observations. */
 public final class ManagedConsumer implements AutoCloseable {
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean stopped = new AtomicBoolean();

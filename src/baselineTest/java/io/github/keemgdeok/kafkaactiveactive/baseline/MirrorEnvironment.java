@@ -18,7 +18,6 @@ import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.images.builder.Transferable;
 
-/** Two independent brokers plus an optional MM2 worker; the worker is not a third Kafka node. */
 final class MirrorEnvironment implements AutoCloseable {
     private final Network network = Network.newNetwork();
     final KafkaContainer a = broker("QaH9lFnjS0m1L8o7Yp3Wbg", "a");
@@ -61,7 +60,7 @@ final class MirrorEnvironment implements AutoCloseable {
                 .withCommand("-c", "exec /opt/kafka/bin/connect-mirror-maker.sh /tmp/mm2.properties")
                 .waitingFor(Wait.forSuccessfulCommand("kill -0 1"))
                 .withStartupCheckStrategy(new MinimumDurationRunningStartupCheckStrategy(Duration.ofSeconds(2)));
-        mirror.start(); // Readiness is proven by finite event-set/checkpoint conditions, not this process check.
+        mirror.start();
     }
     void pauseA() { a.getDockerClient().pauseContainerCmd(a.getContainerId()).exec(); }
     void resumeA() { a.getDockerClient().unpauseContainerCmd(a.getContainerId()).exec(); }

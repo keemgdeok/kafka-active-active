@@ -11,6 +11,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
+import io.github.keemgdeok.kafkaactiveactive.internal.KafkaAccess;
+
 import org.apache.kafka.clients.consumer.CloseOptions;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -19,11 +21,6 @@ import org.apache.kafka.clients.consumer.RangeAssignor;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.common.TopicPartition;
 
-/**
- * Thread-confined consumer for one active Kafka. commit performs bounded blocking native I/O on the
- * owning thread and returns a completed stage. UNKNOWN is terminal: close and reopen to replay history.
- * External application side effects are not part of the Kafka transaction.
- */
 public final class ActiveKafkaConsumer implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(ActiveKafkaConsumer.class.getName());
     private final Thread owner = Thread.currentThread();
@@ -124,7 +121,6 @@ public final class ActiveKafkaConsumer implements AutoCloseable {
         }
         DeliveryWindow.Plan plan = outstanding.plan(batch);
         Set<String> local = new HashSet<>();
-        Set<String> mirrored = new HashSet<>();
         List<CompletionMarker> committedMarkers = new ArrayList<>();
         try {
             verifyInputIdentity();
@@ -164,31 +160,38 @@ public final class ActiveKafkaConsumer implements AutoCloseable {
             closeTransactions();
             LOG.log(System.Logger.Level.WARNING, "completion commit UNKNOWN for group {0}; confirmed IDs={1}; failure={2}",
                     settings.groupId(), local.size(), failure.toString());
-            return CompletableFuture.completedStage(new CommitResult(CommitResult.Status.UNKNOWN, local, mirrored));
+            return CompletableFuture.completedStage(new CommitResult(CommitResult.Status.UNKNOWN, local, Set.of()));
         }
+        return CompletableFuture.completedStage(mirrorCompletions(local, committedMarkers));
+    }
+
+    private CommitResult mirrorCompletions(Set<String> local, List<CompletionMarker> markers) {
+        if (markers.isEmpty()) {
+            return new CommitResult(CommitResult.Status.CONFIRMED, local, Set.of());
+        }
+        long deadline = KafkaAccess.deadline(settings.operationTimeout());
+        Set<String> mirrored = new HashSet<>();
         try {
-            if (!committedMarkers.isEmpty()) {
-                if (peer == null) { peer = new CompletionLedger(settings, peerProperties); }
-                var snapshot = peer.snapshot();
-                if (snapshot.clusterId().equals(ledgerBoundary.clusterId())) {
-                    throw new IllegalStateException("peer aliases the active Kafka cluster");
-                }
-                for (var marker : committedMarkers) {
-                    peer.append(marker);
-                    mirrored.add(marker.id());
-                }
-                peer.verify(snapshot);
+            if (peer == null) { peer = new CompletionLedger(settings, peerProperties, deadline); }
+            var snapshot = peer.snapshot(deadline);
+            if (snapshot.clusterId().equals(ledgerBoundary.clusterId())) {
+                throw new IllegalStateException("peer aliases the active Kafka cluster");
             }
+            for (var marker : markers) {
+                peer.append(marker, deadline);
+                mirrored.add(marker.id());
+            }
+            CompletionLedger.verify(snapshot, peer.snapshot(deadline));
         } catch (RuntimeException unavailable) {
             LOG.log(System.Logger.Level.INFO, "completion peer unavailable for group {0}; local IDs={1}; failure={2}",
                     settings.groupId(), local.size(), unavailable.toString());
             if (peer != null) {
-                try { peer.close(); } catch (RuntimeException ignored) { /* Local ACKs remain valid. */ }
+                try { peer.close(); } catch (RuntimeException ignored) { }
                 peer = null;
             }
-            return CompletableFuture.completedStage(new CommitResult(CommitResult.Status.LOCAL_ONLY, local, mirrored));
+            return new CommitResult(CommitResult.Status.LOCAL_ONLY, local, mirrored);
         }
-        return CompletableFuture.completedStage(new CommitResult(CommitResult.Status.CONFIRMED, local, mirrored));
+        return new CommitResult(CommitResult.Status.CONFIRMED, local, mirrored);
     }
 
     public RuntimeStatus status() {
@@ -212,7 +215,7 @@ public final class ActiveKafkaConsumer implements AutoCloseable {
     }
     private void closeTransactions() {
         transactions.values().forEach(producer -> {
-            try { producer.close(Duration.ZERO); } catch (RuntimeException ignored) { /* Continue releasing other partitions. */ }
+            try { producer.close(Duration.ZERO); } catch (RuntimeException ignored) { }
         });
         transactions.clear();
     }

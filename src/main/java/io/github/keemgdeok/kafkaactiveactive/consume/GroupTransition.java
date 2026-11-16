@@ -8,11 +8,6 @@ import io.github.keemgdeok.kafkaactiveactive.repair.RepairConfig;
 import io.github.keemgdeok.kafkaactiveactive.repair.RepairReport;
 import io.github.keemgdeok.kafkaactiveactive.repair.RepairService;
 
-/**
- * Explicit operator-controlled transition. The stop probe must verify closed consumer instances or
- * terminated consumer workers/deployments, not merely missing Kafka group membership. All instances must follow the same active
- * Kafka configuration; this class does not elect or coordinate a global active group.
- */
 public final class GroupTransition {
     private final ConsumerSettings settings;
     private final Map<String, Object> sourceProperties;
@@ -27,7 +22,6 @@ public final class GroupTransition {
         this.sourceProcessesStopped = Objects.requireNonNull(sourceProcessesStopped, "sourceProcessesStopped");
     }
 
-    /** No target consumer or input-offset reset is performed unless every recovery check succeeds. */
     public Prepared prepare() {
         requireProcessStop();
         try (var source = new CompletionLedger(settings, sourceProperties);
@@ -86,7 +80,6 @@ public final class GroupTransition {
         public RepairReport dataReport() { return data; }
         public CompletionReplicator.Report completionReport() { return completions; }
 
-        /** One use only. Run on the thread that will subsequently own the target SDK consumer. */
         public synchronized ActiveKafkaConsumer startTarget() {
             if (used) { throw new IllegalStateException("transition preparation was already used"); }
             used = true;

@@ -7,7 +7,6 @@ import java.util.Random;
 
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 
-/** Deterministic input shared by demo, fault verification and baseline comparison. */
 public final class EventDataset {
     private EventDataset() {}
     public static List<Event> generate(int count, long seed, boolean hotKey) {

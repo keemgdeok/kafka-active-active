@@ -5,14 +5,16 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.HexFormat;
+import java.util.Objects;
 
-import io.github.keemgdeok.kafkaactiveactive.publish.PublishConfig;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
 
 public record ConsumerSettings(String topic, String groupId, Duration operationTimeout,
                                int maxBatchRecords, int maxCompletedEntries, long maxCompletedBytes,
                                int maxEventBytes) {
     public ConsumerSettings {
-        new PublishConfig(topic, operationTimeout, 1, maxEventBytes, operationTimeout);
+        EventConstraints.validate(topic, maxEventBytes);
+        Objects.requireNonNull(operationTimeout, "operationTimeout");
         if (groupId == null || groupId.isBlank() || groupId.length() > 200
                 || !StandardCharsets.UTF_8.newEncoder().canEncode(groupId)
                 || operationTimeout.compareTo(Duration.ofSeconds(1)) < 0
@@ -25,12 +27,14 @@ public record ConsumerSettings(String topic, String groupId, Duration operationT
 
     public static ConsumerSettings defaults(String topic, String groupId) {
         return new ConsumerSettings(topic, groupId, Duration.ofSeconds(10), 100,
-                1_000_000, 256L * 1024 * 1024, 900_000);
+                1_000_000, 256L * 1024 * 1024, EventConstraints.DEFAULT_MAX_EVENT_BYTES);
     }
 
     public String completionTopic() { return "__kaa_completed_" + namespace(); }
     public String transactionalId(int partition) {
-        if (partition < 0 || partition > 1) { throw new IllegalArgumentException("invalid partition"); }
+        if (partition < 0 || partition >= EventConstraints.PARTITION_COUNT) {
+            throw new IllegalArgumentException("invalid partition");
+        }
         return "kaa-" + namespace() + "-" + partition;
     }
 

@@ -11,13 +11,13 @@ import java.util.Map;
 import java.util.Set;
 
 import io.github.keemgdeok.kafkaactiveactive.internal.EventCodec;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
 import io.github.keemgdeok.kafkaactiveactive.publish.Event;
 
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 
-/** Reads real logs to finite boundaries; topic unions support the default MM2 naming policy. */
 public final class EventAudit {
     private EventAudit() {}
     public static Report read(Map<String, Object> nativeProperties, Collection<String> topics, List<Event> expected) {
@@ -53,7 +53,7 @@ public final class EventAudit {
                 for (var record : consumer.poll(Duration.ofMillis(100))) {
                     if (record.offset() >= ends.get(new TopicPartition(record.topic(), record.partition()))) { continue; }
                     physical++;
-                    var identity = EventCodec.identity(record, 16 * 1024 * 1024);
+                    var identity = EventCodec.identity(record, EventConstraints.MAX_EVENT_BYTES);
                     roles.merge(EventCodec.kind(record).name() + ".P" + record.partition(), 1L, Long::sum);
                     Event event = byId.get(identity.id());
                     if (event == null) { unexpected.add(identity.id()); continue; }

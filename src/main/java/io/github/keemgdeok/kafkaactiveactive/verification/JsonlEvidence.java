@@ -7,7 +7,6 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Map;
 
-/** Write-only diagnostic evidence. The SDK never reads this file as operational state. */
 public final class JsonlEvidence implements AutoCloseable {
     private final PrintWriter output;
     public JsonlEvidence(Path file) throws IOException {

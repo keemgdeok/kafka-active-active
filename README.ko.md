@@ -38,10 +38,8 @@ Gradle 빌드에 SDK 소스를 연결한다. 경로는 저장소를 내려받은
 `a`, `b`는 Kafka별 접속 설정이고 `topic`은 양쪽에서 사용하는 토픽 이름이다.
 
 ```java
-// Reuse the publisher until shutdown.
 var publisher = RoutedKafkaPublisher.open(PublishConfig.defaults(topic), a, b);
 
-// For each event.
 var resultStage = publisher.send(new Event(eventId, key, payloadBytes));
 ```
 
@@ -65,13 +63,11 @@ docker compose -f infra/compose.yaml up -d --wait kafka-a kafka-b
 docker compose -f infra/compose.yaml run --rm init-topics
 ```
 
-두 명령을 각각 다른 터미널에서 실행한다.
+두 명령을 각각 다른 터미널에서 실행한다. 첫 번째 프로세스가 복제를 담당한다.
 
 ```bash
-# Terminal 1: publisher and replication owner
 KAA_REPLICATION_ENABLED=true ./gradlew --no-daemon runProducerExample
 
-# Terminal 2: publisher only (the default role)
 KAA_REPLICATION_ENABLED=false ./gradlew --no-daemon runProducerExample
 ```
 
@@ -161,7 +157,7 @@ public class Example {
 ./gradlew --no-daemon -p ../sdk-example run
 ```
 
-새 토픽의 첫 실행에서 `order-001`이 출력된다. 다시 실행하면 완료된 ID가 걸러진다. Consumer의 생성·poll·commit·close는 같은 스레드에서 수행한다.
+새 토픽의 첫 실행에서 `order-001`이 출력된다. 다시 실행하면 완료된 ID가 걸러진다. Consumer의 생성·poll·commit·close는 같은 스레드에서 수행한다. `commit()`은 이 스레드에서 Kafka I/O를 마친 뒤 완료된 stage를 반환한다.
 
 </details>
 

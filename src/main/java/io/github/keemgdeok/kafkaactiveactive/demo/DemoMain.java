@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
 import io.github.keemgdeok.kafkaactiveactive.consume.ActiveKafkaConsumer;
 import io.github.keemgdeok.kafkaactiveactive.consume.CommitResult;
 import io.github.keemgdeok.kafkaactiveactive.consume.ConsumerSettings;
@@ -32,7 +33,6 @@ import io.github.keemgdeok.kafkaactiveactive.verification.JsonlEvidence;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.NewTopic;
 
-/** Runnable example only. Docker orchestration is optional and never used by SDK classes. */
 public final class DemoMain {
     private DemoMain() {}
     public static void main(String[] args) throws Exception {
@@ -52,7 +52,7 @@ public final class DemoMain {
         String suffix = UUID.randomUUID().toString();
         String topic = "kaa-demo-" + suffix;
         var settings = new ConsumerSettings(topic, "kaa-demo-" + suffix, Duration.ofSeconds(5), 100,
-                100_000, 64L * 1024 * 1024, 900_000);
+                100_000, 64L * 1024 * 1024, EventConstraints.DEFAULT_MAX_EVENT_BYTES);
         var a = Map.<String, Object>of("bootstrap.servers", bootstrapA);
         var b = Map.<String, Object>of("bootstrap.servers", bootstrapB);
         var topology = KafkaTopologyVerifier.verify(bootstrapA, bootstrapB, Duration.ofSeconds(10));
@@ -95,7 +95,8 @@ public final class DemoMain {
             });
             try {
                 await(ready::get, worker);
-                var publishConfig = new PublishConfig(topic, Duration.ofSeconds(2), 128, 900_000, Duration.ofSeconds(3));
+                var publishConfig = new PublishConfig(topic, Duration.ofSeconds(2), 128,
+                        EventConstraints.DEFAULT_MAX_EVENT_BYTES, Duration.ofSeconds(3));
                 try (var publisher = RoutedKafkaPublisher.open(publishConfig, a, b)) {
                     for (int i = 0; i < events.size(); i++) {
                         if (project != null && i == count / 3) {
@@ -125,7 +126,6 @@ public final class DemoMain {
             if (calls.size() != count || calls.values().stream().anyMatch(value -> value.get() != 1)) {
                 throw new IllegalStateException("handler delivery mismatch");
             }
-            // B was the active group. Closed worker state is the stop evidence for transition to A.
             var prepared = new GroupTransition(settings, b, a, stopped::get).prepare();
             evidence.record("repair", Map.of("copied_to_a", prepared.dataReport().copiedToB(),
                     "completion_copies_to_a", prepared.completionReport().copiedToB()));
@@ -160,7 +160,7 @@ public final class DemoMain {
     }
     private static void createTopic(Map<String, Object> properties, String topic) throws Exception {
         try (Admin admin = Admin.create(properties)) {
-            admin.createTopics(List.of(new NewTopic(topic, 2, (short) 1).configs(Map.of(
+            admin.createTopics(List.of(new NewTopic(topic, EventConstraints.PARTITION_COUNT, (short) 1).configs(Map.of(
                     "retention.ms", "-1", "retention.bytes", "-1", "cleanup.policy", "delete"))))
                     .all().get(15, TimeUnit.SECONDS);
         }

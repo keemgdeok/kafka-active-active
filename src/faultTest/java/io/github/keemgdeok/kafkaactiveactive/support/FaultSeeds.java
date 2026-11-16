@@ -2,7 +2,6 @@ package io.github.keemgdeok.kafkaactiveactive.support;
 
 import java.util.stream.IntStream;
 
-/** A bounded, reproducible seed selection: one seed or an inclusive range within 0..19. */
 public final class FaultSeeds {
     private FaultSeeds() {}
     public static IntStream values() {

@@ -6,7 +6,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
-/** A separate JVM makes halt tests exercise actual lost memory, sockets and orphan transactions. */
 public final class CrashProcess {
     public static final int EXPECTED_EXIT = 73;
     private CrashProcess() {}

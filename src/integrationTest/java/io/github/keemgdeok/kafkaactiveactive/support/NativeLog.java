@@ -13,7 +13,6 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
 import io.github.keemgdeok.kafkaactiveactive.internal.KafkaAccess;
 
-/** Native finite-log evidence independent of SDK counters and response grades. */
 public final class NativeLog {
     private NativeLog() {}
     public static List<ConsumerRecord<byte[], byte[]>> read(Map<String, Object> properties, String topic) {
@@ -33,7 +32,6 @@ public final class NativeLog {
             return List.copyOf(records);
         } finally { reader.close(CloseOptions.timeout(Duration.ZERO)); }
     }
-    /** EndTxn acknowledgement and read_committed visibility are not one observer snapshot. */
     public static List<ConsumerRecord<byte[], byte[]>> awaitVisibleCount(Map<String, Object> properties,
                                                                          String topic, int expected) {
         long end = System.nanoTime() + Duration.ofSeconds(15).toNanos();

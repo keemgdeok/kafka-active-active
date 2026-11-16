@@ -3,9 +3,8 @@ package io.github.keemgdeok.kafkaactiveactive.publish;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;
-import org.apache.kafka.common.utils.Utils;
+import io.github.keemgdeok.kafkaactiveactive.internal.EventConstraints;
 
-/** A caller-assigned identity. Application retries must reuse the ID, key and payload. */
 public record Event(String eventId, String key, byte[] payload) {
     public Event {
         if (eventId == null || eventId.isBlank() || key == null || key.isBlank()) {
@@ -35,7 +34,7 @@ public record Event(String eventId, String key, byte[] payload) {
     }
 
     public int partition() {
-        return Utils.toPositive(Utils.murmur2(key.getBytes(StandardCharsets.UTF_8))) % 2;
+        return EventConstraints.partition(key.getBytes(StandardCharsets.UTF_8));
     }
 
     long sizeBytes() {
