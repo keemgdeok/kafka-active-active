@@ -96,6 +96,7 @@ tasks.register<Zip>("centralBundle") {
     dependsOn("publishSdkPublicationToStagingRepository")
     archiveClassifier.set("central")
     destinationDirectory.set(layout.buildDirectory.dir("releases"))
+    inputs.property("hasSigningKey", signingKey.isPresent)
     from(stagingRepository.map { it.dir(repositoryPath) }) {
         into(repositoryPath)
     }
