@@ -281,7 +281,7 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
         private final Attempt[] attempts = {new Attempt(), new Attempt()};
         private ScheduledFuture<?> deadlineTask;
         private ScheduledFuture<?> fallbackTask;
-        private PublishResult responseSnapshot;
+        private boolean responseFrozen;
         private boolean released;
 
         private Request(Event event) {
@@ -292,7 +292,7 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
             fallbackAt = admittedAt + config.preferredAckTimeout().toNanos();
         }
         private synchronized boolean canDispatch() {
-            return !closed && responseSnapshot == null && clock.getAsLong() - deadline < 0;
+            return !closed && !responseFrozen && clock.getAsLong() - deadline < 0;
         }
         private synchronized void captureGeneration(int side) { attempts[side].generation = generations.get(side); }
         private synchronized void schedule(int side) {
@@ -308,57 +308,46 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
                 schedule(1 - partition);
             }
         }
-        private void finished(int side, RecordMetadata metadata, Exception error) {
-            PublishResult result;
-            synchronized (this) {
-                var attempt = attempts[side];
-                if (attempt.sendFinished) { return; }
-                if (clock.getAsLong() - deadline >= 0 && responseSnapshot == null) { freezeResponse("deadline elapsed"); }
-                attempt.sendFinished = true;
-                if (responseSnapshot == null) {
-                    if (metadata != null && error == null && metadata.hasOffset()
-                            && metadata.partition() == partition && metadata.topic().equals(config.topic())) {
-                        attempt.rawOffset = metadata.offset();
-                        attempt.outcome = new PublishResult.BrokerResult(ACKNOWLEDGED, metadata.offset(), null);
-                        if (side == partition && fallbackTask != null) { fallbackTask.cancel(false); }
-                        if (attempt.earlyReceipt != null) { applyReceipt(side, attempt.earlyReceipt); }
-                    } else if (error != null || metadata != null) {
-                        if (attempt.outcome.delivery() != ACKNOWLEDGED) {
-                            attempt.outcome = new PublishResult.BrokerResult(FAILED, null,
-                                    error == null ? "InvalidMetadata" : error.getClass().getSimpleName());
-                        }
-                        if (side == partition) { schedule(1 - side); }
+        private synchronized void finished(int side, RecordMetadata metadata, Exception error) {
+            var attempt = attempts[side];
+            if (attempt.sendFinished) { return; }
+            attempt.sendFinished = true;
+            if (clock.getAsLong() - deadline >= 0 && !responseFrozen) { freezeResponse("deadline elapsed"); }
+            if (!responseFrozen) {
+                if (metadata != null && error == null && metadata.hasOffset()
+                        && metadata.partition() == partition && metadata.topic().equals(config.topic())) {
+                    attempt.rawOffset = metadata.offset();
+                    attempt.outcome = new PublishResult.BrokerResult(ACKNOWLEDGED, metadata.offset(), null);
+                    if (side == partition && fallbackTask != null) { fallbackTask.cancel(false); }
+                    if (attempt.earlyReceipt != null) { applyReceipt(side, attempt.earlyReceipt); }
+                } else if (error != null || metadata != null) {
+                    if (attempt.outcome.delivery() != ACKNOWLEDGED) {
+                        attempt.outcome = new PublishResult.BrokerResult(FAILED, null,
+                                error == null ? "InvalidMetadata" : error.getClass().getSimpleName());
                     }
-                    if (ackCount() == 2) { freezeResponse("both storage ACKs confirmed"); }
-                    else if (attempts[0].sendFinished && attempts[1].sendFinished && ackCount() == 0) {
-                        freezeResponse("no native write acknowledged");
-                    }
+                    if (side == partition) { schedule(1 - side); }
                 }
-                releaseIfSettled();
-                result = responseSnapshot;
+                if (ackCount() == 2) { freezeResponse("both storage ACKs confirmed"); }
+                else if (attempts[0].sendFinished && attempts[1].sendFinished && ackCount() == 0) {
+                    freezeResponse("no native write acknowledged");
+                }
             }
-            if (result != null) { response.complete(result); }
+            releaseIfSettled();
         }
-        private void receipt(int side, ReplicationAck ack,
-                             AcknowledgementReader.Generation actual) {
-            PublishResult result;
-            synchronized (this) {
-                if (responseSnapshot != null) { return; }
-                var attempt = attempts[side];
-                if (clock.getAsLong() - deadline >= 0) { freezeResponse("deadline elapsed"); }
-                else if (!attempt.scheduled || !attempt.id.equals(ack.attempt())
-                        || !event.eventId().equals(ack.eventId()) || partition != ack.partition()
-                        || !java.util.Arrays.equals(EventCodec.hash(event.key(), event.payload()), ack.hash())
-                        || attempt.generation == null || !attempt.generation.equals(actual)
-                        || !actual.source().equals(ack.source()) || !actual.target().equals(ack.target())) {
-                    invalidReceipts.incrementAndGet();
-                } else if (attempt.rawOffset == null) { attempt.earlyReceipt = ack; }
-                else { applyReceipt(side, ack); }
-                if (responseSnapshot == null && ackCount() == 2) { freezeResponse("raw and replicated storage ACKs confirmed"); }
-                releaseIfSettled();
-                result = responseSnapshot;
-            }
-            if (result != null) { response.complete(result); }
+        private synchronized void receipt(int side, ReplicationAck ack,
+                                          AcknowledgementReader.Generation actual) {
+            if (responseFrozen) { return; }
+            var attempt = attempts[side];
+            if (clock.getAsLong() - deadline >= 0) { freezeResponse("deadline elapsed"); }
+            else if (!attempt.scheduled || !attempt.id.equals(ack.attempt())
+                    || !event.eventId().equals(ack.eventId()) || partition != ack.partition()
+                    || !java.util.Arrays.equals(EventCodec.hash(event.key(), event.payload()), ack.hash())
+                    || attempt.generation == null || !attempt.generation.equals(actual)
+                    || !actual.source().equals(ack.source()) || !actual.target().equals(ack.target())) {
+                invalidReceipts.incrementAndGet();
+            } else if (attempt.rawOffset == null) { attempt.earlyReceipt = ack; }
+            else { applyReceipt(side, ack); }
+            if (!responseFrozen && ackCount() == 2) { freezeResponse("raw and replicated storage ACKs confirmed"); }
         }
         private void applyReceipt(int side, ReplicationAck ack) {
             if (!Objects.equals(attempts[side].rawOffset, ack.sourceOffset())) {
@@ -370,21 +359,12 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
                         PublishResult.Evidence.REPLICATION_ACK);
             }
         }
-        private void expire() {
-            PublishResult result;
-            synchronized (this) {
-                if (responseSnapshot == null && clock.getAsLong() - deadline >= 0) { freezeResponse("deadline elapsed"); }
-                releaseIfSettled(); result = responseSnapshot;
-            }
-            if (result != null) { response.complete(result); }
+        private synchronized void expire() {
+            if (!responseFrozen && clock.getAsLong() - deadline >= 0) { freezeResponse("deadline elapsed"); }
         }
-        private void finishOnClose() {
-            PublishResult result;
-            synchronized (this) {
-                if (responseSnapshot == null) { freezeResponse("publisher closed before both ACKs"); }
-                release(); result = responseSnapshot;
-            }
-            response.complete(result);
+        private synchronized void finishOnClose() {
+            release();
+            if (!responseFrozen) { freezeResponse("publisher closed before both ACKs"); }
         }
         private int ackCount() {
             return (attempts[0].outcome.delivery() == ACKNOWLEDGED ? 1 : 0)
@@ -399,21 +379,26 @@ public final class RoutedKafkaPublisher implements AutoCloseable {
                     && !a.source().clusterId().equals(b.source().clusterId());
         }
         private void freezeResponse(String reason) {
+            if (responseFrozen) { return; }
             int count = ackCount();
             boolean confirmed = count == 2 && hasIndependentAckEvidence();
-            responseSnapshot = new PublishResult(event.eventId(), partition,
+            var result = new PublishResult(event.eventId(), partition,
                     confirmed ? CONFIRMED : count >= 1 ? ACCEPTED_DEGRADED : UNKNOWN,
                     attempts[0].outcome, attempts[1].outcome, count == 2 && !confirmed
                             ? "two ACKs observed without distinct native log identities" : reason);
+            responseFrozen = true;
             if (deadlineTask != null) { deadlineTask.cancel(false); }
             if (fallbackTask != null) { fallbackTask.cancel(false); }
             for (var attempt : attempts) {
                 requestsByAttemptId.remove(attempt.id, this);
                 attempt.earlyReceipt = null;
             }
+            releaseIfSettled();
+            var callerResponse = response;
+            Thread.startVirtualThread(() -> callerResponse.complete(result));
         }
         private void releaseIfSettled() {
-            if (responseSnapshot != null && attempts[0].settled() && attempts[1].settled()) { release(); }
+            if (responseFrozen && attempts[0].settled() && attempts[1].settled()) { release(); }
         }
         private void release() {
             if (!released) { released = true; active.remove(this); permits.release(); }
