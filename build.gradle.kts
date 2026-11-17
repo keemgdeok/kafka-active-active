@@ -2,7 +2,9 @@ import java.time.Duration
 
 plugins {
     `java-library`
+    `maven-publish`
     application
+    signing
 }
 
 application {
@@ -18,7 +20,8 @@ tasks.register<JavaExec>("runProducerExample") {
 }
 
 group = "io.github.keemgdeok"
-version = "0.1.0-SNAPSHOT"
+val releaseVersion = providers.gradleProperty("releaseVersion")
+version = releaseVersion.getOrElse("0.1.0-SNAPSHOT")
 
 repositories {
     mavenCentral()
@@ -26,6 +29,82 @@ repositories {
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(21))
+    withSourcesJar()
+    withJavadocJar()
+}
+
+tasks.jar {
+    from("LICENSE") { into("META-INF") }
+}
+
+tasks.javadoc {
+    (options as StandardJavadocDocletOptions).addBooleanOption("Xdoclint:all,-missing", true)
+}
+
+val stagingRepository = layout.buildDirectory.dir("maven-staging")
+val repositoryPath = "${group.toString().replace('.', '/')}/${project.name}/${version}"
+val projectUrl = "https://github.com/keemgdeok/kafka-active-active"
+
+publishing {
+    publications {
+        create<MavenPublication>("sdk") {
+            from(components["java"])
+            pom {
+                name.set("Kafka Active-Active")
+                description.set("Java SDK for key-routed publishing and same-partition replication across two independent Kafka deployments.")
+                url.set(projectUrl)
+                licenses {
+                    license {
+                        name.set("Apache License, Version 2.0")
+                        url.set("https://www.apache.org/licenses/LICENSE-2.0")
+                    }
+                }
+                developers {
+                    developer {
+                        id.set("keemgdeok")
+                        name.set("keemgdeok")
+                        url.set("https://github.com/keemgdeok")
+                    }
+                }
+                scm {
+                    url.set(projectUrl)
+                    connection.set("scm:git:$projectUrl.git")
+                    developerConnection.set("scm:git:ssh://git@github.com/keemgdeok/kafka-active-active.git")
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = "staging"
+            url = uri(stagingRepository)
+        }
+    }
+}
+
+val signingKey = providers.environmentVariable("KAA_SIGNING_KEY")
+val signingPassword = providers.environmentVariable("KAA_SIGNING_PASSWORD")
+signing {
+    isRequired = signingKey.isPresent
+    useInMemoryPgpKeys(signingKey.orNull, signingPassword.orNull)
+    sign(publishing.publications["sdk"])
+}
+
+tasks.register<Zip>("centralBundle") {
+    group = "publishing"
+    description = "Bundles the signed release for upload to Sonatype Central."
+    dependsOn("publishSdkPublicationToStagingRepository")
+    archiveClassifier.set("central")
+    destinationDirectory.set(layout.buildDirectory.dir("releases"))
+    from(stagingRepository.map { it.dir(repositoryPath) }) {
+        into(repositoryPath)
+    }
+    doFirst {
+        check(releaseVersion.orNull?.matches(Regex("""\d+\.\d+\.\d+""")) == true) {
+            "Set -PreleaseVersion to a release version such as 0.1.0."
+        }
+        check(signingKey.isPresent) { "Set KAA_SIGNING_KEY to an ASCII-armored OpenPGP secret key." }
+    }
 }
 
 val integrationTest = sourceSets.create("integrationTest")

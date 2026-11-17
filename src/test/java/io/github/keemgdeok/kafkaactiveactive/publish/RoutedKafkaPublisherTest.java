@@ -131,6 +131,49 @@ class RoutedKafkaPublisherTest {
         assertEquals(0, publisher.pendingRequests()); receipt(0, ack(raw, EVENT, 0, 3));
         assertEquals(snapshot, response.join()); assertTrue(b.history().isEmpty());
     }
+    @Test void blockedResultCallbackCannotBlockAnotherRequestsFallbackOrDeadline() throws Exception {
+        var left = new ControlledProducer();
+        var right = new ControlledProducer();
+        var callbackStarted = new CountDownLatch(1);
+        var releaseCallback = new CountDownLatch(1);
+        var config = new PublishConfig("events", Duration.ofSeconds(2), 2, 128,
+                Duration.ofMillis(200), Duration.ofMillis(500));
+        try (var live = new RoutedKafkaPublisher(config, left, right, System::nanoTime)) {
+            try {
+                var callback = live.send(EVENT).thenAccept(result -> {
+                    assertEquals(ACCEPTED_DEGRADED, result.status());
+                    callbackStarted.countDown();
+                    try {
+                        assertTrue(releaseCallback.await(10, TimeUnit.SECONDS));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(interrupted);
+                    }
+                });
+                left.next();
+                left.completeNext();
+                assertTrue(callbackStarted.await(4, TimeUnit.SECONDS));
+
+                var next = live.send(new Event("event-2", "kafka", new byte[] {4})).toCompletableFuture();
+                left.next();
+                assertEquals(0, right.next().partition());
+                right.completeNext();
+                var result = next.get(3, TimeUnit.SECONDS);
+                assertEquals(ACCEPTED_DEGRADED, result.status());
+                assertEquals(PublishResult.Evidence.DIRECT_RAW_ACK, result.clusterB().evidence());
+                assertFalse(callback.toCompletableFuture().isDone());
+                assertEquals(1, live.pendingRequests());
+                left.completeNext();
+                assertEquals(0, live.pendingRequests());
+                assertEquals(result, next.join());
+
+                releaseCallback.countDown();
+                callback.toCompletableFuture().get(2, TimeUnit.SECONDS);
+            } finally {
+                releaseCallback.countDown();
+            }
+        }
+    }
     @Test void pendingNativeWritesRetainCapacityAfterResponseAndLateAcksCannotChangeIt() throws Exception {
         var response = publisher.send(EVENT).toCompletableFuture(); a.next(); fallback(); b.next(); expire();
         var snapshot = response.get(2, TimeUnit.SECONDS); assertEquals(UNKNOWN, snapshot.status());
