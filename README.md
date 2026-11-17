@@ -30,10 +30,11 @@ If the preferred write fails or its ACK deadline expires, the SDK attempts one w
 
 ## Java usage
 
-Add the SDK source to your Gradle build. Adjust the checkout path as needed.
+With `mavenCentral()` in your Gradle repositories, add the SDK dependency.
 
-- `settings.gradle.kts` — `includeBuild("../kafka-active-active")`
-- `build.gradle.kts` — `dependencies { implementation("io.github.keemgdeok:kafka-active-active") }`
+```kotlin
+implementation("io.github.keemgdeok:kafka-active-active:0.1.0")
+```
 
 `a` and `b` hold the Kafka connection settings. `topic` is the shared topic name.
 
@@ -86,7 +87,6 @@ Create `sdk-example` alongside this repository. Add `sdk-example/settings.gradle
 
 ```kotlin
 rootProject.name = "sdk-example"
-includeBuild("../kafka-active-active")
 ```
 
 Add `sdk-example/build.gradle.kts`.
@@ -95,7 +95,7 @@ Add `sdk-example/build.gradle.kts`.
 plugins { application }
 repositories { mavenCentral() }
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(21)) }
-dependencies { implementation("io.github.keemgdeok:kafka-active-active") }
+dependencies { implementation("io.github.keemgdeok:kafka-active-active:0.1.0") }
 application { mainClass.set("Example") }
 ```
 
