@@ -30,11 +30,10 @@ A가 멈춘 동안 B에서 발행과 소비를 이어간다. A가 돌아오면 �
 
 ## Java 사용법
 
-Gradle 저장소에 `mavenCentral()`을 사용하고 SDK 의존성을 추가한다.
+Gradle 빌드에 SDK 소스를 연결한다. 경로는 저장소를 내려받은 위치에 맞춘다.
 
-```kotlin
-implementation("io.github.keemgdeok:kafka-active-active:0.1.0")
-```
+- `settings.gradle.kts` — `includeBuild("../kafka-active-active")`
+- `build.gradle.kts` — `dependencies { implementation("io.github.keemgdeok:kafka-active-active") }`
 
 `a`, `b`는 Kafka별 접속 설정이고 `topic`은 양쪽에서 사용하는 토픽 이름이다.
 
@@ -87,6 +86,7 @@ order-002	customer-42	hello
 
 ```kotlin
 rootProject.name = "sdk-example"
+includeBuild("../kafka-active-active")
 ```
 
 `sdk-example/build.gradle.kts`를 작성한다.
@@ -95,7 +95,7 @@ rootProject.name = "sdk-example"
 plugins { application }
 repositories { mavenCentral() }
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(21)) }
-dependencies { implementation("io.github.keemgdeok:kafka-active-active:0.1.0") }
+dependencies { implementation("io.github.keemgdeok:kafka-active-active") }
 application { mainClass.set("Example") }
 ```
 
