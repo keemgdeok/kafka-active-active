@@ -10,9 +10,11 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.stream.IntStream;
 
@@ -94,6 +96,64 @@ class NetworkFaultTest {
             if (!batch.isEmpty()) { return batch; }
         }
         throw new AssertionError("no delivery: " + consumer.status());
+    }
+
+    @Test void unavailablePeerGetsOneAttemptPerRetryWindowAndSkippedHistoryIsRepaired() throws Exception {
+        String topic = "completion-retry-" + UUID.randomUUID();
+        KAFKA.createTopic(topic);
+        var settings = settings(topic);
+        var retryClock = new AtomicLong();
+        long retryWindowNanos = settings.operationTimeout().toNanos();
+        var events = EventDataset.generate(5, 0, true);
+        var writerConfig = KafkaAccess.writer(KAFKA.aDirect(), settings.operationTimeout(), settings.maxEventBytes());
+        try (var writer = new KafkaProducer<byte[], byte[]>(writerConfig)) {
+            try (var consumer = new ActiveKafkaConsumer(settings, KAFKA.aDirect(), KAFKA.bProxied(),
+                    (partition, point) -> {}, retryClock::get)) {
+                assertEquals(CommitResult.Status.CONFIRMED,
+                        writeAndComplete(writer, consumer, topic, events.get(0)).status());
+                KAFKA.proxyB.disable();
+                try {
+                    assertLocalOnly(writeAndComplete(writer, consumer, topic, events.get(1)), events.get(1));
+                    retryClock.set(retryWindowNanos / 2);
+                    assertLocalOnly(writeAndComplete(writer, consumer, topic, events.get(2)), events.get(2));
+                } finally {
+                    KAFKA.heal();
+                }
+
+                retryClock.set(retryWindowNanos - 1);
+                assertLocalOnly(writeAndComplete(writer, consumer, topic, events.get(3)), events.get(3));
+
+                retryClock.incrementAndGet();
+                var recovered = writeAndComplete(writer, consumer, topic, events.get(4));
+                assertEquals(CommitResult.Status.CONFIRMED, recovered.status());
+                assertEquals(Set.of(events.get(4).eventId()), recovered.peerConfirmedIds());
+            }
+
+            var prepared = new GroupTransition(settings, KAFKA.aDirect(), KAFKA.bDirect(), () -> true).prepare();
+            assertEquals(5, prepared.completionReport().completedIds());
+            assertEquals(3, prepared.completionReport().copiedToB());
+            try (var target = prepared.startTarget()) {
+                long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+                while (target.status().filteredRecords() < 5 && System.nanoTime() - deadline < 0) {
+                    assertTrue(target.poll(Duration.ofMillis(200)).isEmpty(), "completed event was redelivered");
+                }
+                assertEquals(5, target.status().filteredRecords());
+            }
+        }
+    }
+
+    private static void assertLocalOnly(CommitResult result, Event event) {
+        assertEquals(CommitResult.Status.LOCAL_ONLY, result.status());
+        assertEquals(Set.of(event.eventId()), result.locallyCompletedIds());
+        assertTrue(result.peerConfirmedIds().isEmpty());
+    }
+
+    private static CommitResult writeAndComplete(KafkaProducer<byte[], byte[]> writer, ActiveKafkaConsumer consumer,
+                                                  String topic, Event event) throws Exception {
+        writer.send(EventCodec.raw(topic, event, UUID.randomUUID())).get(5, TimeUnit.SECONDS);
+        var batch = awaitBatch(consumer);
+        assertEquals(List.of(event), batch.records().stream().map(delivery -> delivery.event()).toList());
+        return consumer.commit(batch.processed()).toCompletableFuture().join();
     }
 
     @ParameterizedTest(name = "seed={0} lost ACK, asymmetric cut, hot key and live repair") @MethodSource("seeds")
