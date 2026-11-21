@@ -10,6 +10,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeoutException;
+import java.util.function.LongSupplier;
 
 import io.github.keemgdeok.kafkaactiveactive.internal.KafkaAccess;
 
@@ -30,7 +32,9 @@ public final class ActiveKafkaConsumer implements AutoCloseable {
     private final CompletionLedger ledger;
     private final String inputTopicId;
     private final java.util.function.BiConsumer<Integer, CommitPoint> commitHook;
+    private final LongSupplier peerRetryClock;
     private CompletionLedger peer;
+    private Long retryPeerAfterNanos;
     private final Map<Integer, KafkaProducer<byte[], byte[]>> transactions = new HashMap<>();
     private CompletedIndex completed;
     private CompletionLedger.Snapshot ledgerBoundary;
@@ -49,8 +53,16 @@ public final class ActiveKafkaConsumer implements AutoCloseable {
     ActiveKafkaConsumer(ConsumerSettings settings, Map<String, Object> activeProperties,
                         Map<String, Object> peerProperties,
                         java.util.function.BiConsumer<Integer, CommitPoint> commitHook) {
+        this(settings, activeProperties, peerProperties, commitHook, System::nanoTime);
+    }
+
+    ActiveKafkaConsumer(ConsumerSettings settings, Map<String, Object> activeProperties,
+                        Map<String, Object> peerProperties,
+                        java.util.function.BiConsumer<Integer, CommitPoint> commitHook,
+                        LongSupplier peerRetryClock) {
         this.settings = settings;
         this.commitHook = commitHook;
+        this.peerRetryClock = peerRetryClock;
         this.peerProperties = Map.copyOf(peerProperties);
         if (!activeProperties.containsKey("bootstrap.servers") || !peerProperties.containsKey("bootstrap.servers")
                 || activeProperties.get("bootstrap.servers").equals(peerProperties.get("bootstrap.servers"))) {
@@ -169,6 +181,10 @@ public final class ActiveKafkaConsumer implements AutoCloseable {
         if (markers.isEmpty()) {
             return new CommitResult(CommitResult.Status.CONFIRMED, local, Set.of());
         }
+        if (retryPeerAfterNanos != null && retryPeerAfterNanos - peerRetryClock.getAsLong() > 0) {
+            return new CommitResult(CommitResult.Status.LOCAL_ONLY, local, Set.of());
+        }
+        retryPeerAfterNanos = null;
         long deadline = KafkaAccess.deadline(settings.operationTimeout());
         Set<String> mirrored = new HashSet<>();
         try {
@@ -189,9 +205,21 @@ public final class ActiveKafkaConsumer implements AutoCloseable {
                 try { peer.close(); } catch (RuntimeException ignored) { }
                 peer = null;
             }
+            if (mirrored.isEmpty() && timedOut(unavailable)) {
+                retryPeerAfterNanos = peerRetryClock.getAsLong() + settings.operationTimeout().toNanos();
+            }
             return new CommitResult(CommitResult.Status.LOCAL_ONLY, local, mirrored);
         }
         return new CommitResult(CommitResult.Status.CONFIRMED, local, mirrored);
+    }
+
+    private static boolean timedOut(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof TimeoutException || cause instanceof org.apache.kafka.common.errors.TimeoutException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public RuntimeStatus status() {

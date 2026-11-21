@@ -82,7 +82,9 @@ final class CompletionLedger implements AutoCloseable {
     private void awaitInitialMetadata(String createdId, long deadline) {
         while (true) {
             long remaining = deadline - System.nanoTime();
-            if (remaining <= 0) { throw new IllegalStateException("completion topic metadata readiness deadline elapsed"); }
+            if (remaining <= 0) {
+                throw new IllegalStateException("completion topic metadata readiness deadline elapsed", new TimeoutException());
+            }
             try {
                 var topic = admin.describeTopics(List.of(settings.completionTopic())).allTopicNames()
                         .get(remaining, TimeUnit.NANOSECONDS).get(settings.completionTopic());
@@ -316,7 +318,9 @@ final class CompletionLedger implements AutoCloseable {
 
     private static Duration remaining(long deadline) {
         long nanos = deadline - System.nanoTime();
-        if (nanos <= 0) { throw new IllegalStateException("completion operation deadline elapsed"); }
+        if (nanos <= 0) {
+            throw new IllegalStateException("completion operation deadline elapsed", new TimeoutException());
+        }
         return Duration.ofNanos(nanos);
     }
 
